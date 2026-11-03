@@ -7,6 +7,8 @@ import logging
 import datetime
 import traceback
 
+from app.configuration import paths
+
 logger = logging.getLogger("Configuration")
 
 class ConfigurationSettings():
@@ -14,7 +16,8 @@ class ConfigurationSettings():
     A class that manages a JSON configuration file containing application settings and user data.
     """
     def __init__(self):
-        self.settings_path = "app/configuration/settings.json"
+        paths.ensure_xdg_layout()
+        self.settings_path = str(paths.config_file("settings.json"))
 
     def load_configuration(self):
         """
@@ -182,7 +185,8 @@ class ConfigurationAPI():
     A class for managing API tokens stored in a JSON configuration file.
     """
     def __init__(self):
-        self.api_tokens_path = "app/configuration/api.json"
+        paths.ensure_xdg_layout()
+        self.api_tokens_path = str(paths.config_file("api.json"))
 
     def load_configuration(self):
         """
@@ -226,7 +230,8 @@ class ConfigurationCharacters():
     A class for managing character data stored in a JSON configuration file.
     """
     def __init__(self):
-        self.characters_path = "app/configuration/characters.json"
+        paths.ensure_xdg_layout()
+        self.characters_path = str(paths.config_file("characters.json"))
         self.configuration_data = self.load_configuration()
 
     def load_configuration(self):
