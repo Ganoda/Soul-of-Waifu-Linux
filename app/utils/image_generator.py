@@ -14,11 +14,12 @@ logger = logging.getLogger("ImageGenerator")
 _TIMEOUT_LOCAL = aiohttp.ClientTimeout(total=120)
 _TIMEOUT_CLOUD = aiohttp.ClientTimeout(total=60)
 
-PROVIDER_A1111    = "Automatic1111"
-PROVIDER_COMFYUI  = "ComfyUI (A1111 API)"
-PROVIDER_DALLE    = "DALL-E 3"
-PROVIDER_NOVELAI  = "NovelAI"
-PROVIDER_FLUX     = "FLUX"
+PROVIDER_A1111       = "Automatic1111"
+PROVIDER_COMFYUI     = "ComfyUI (A1111 API)"
+PROVIDER_COMFY_WF    = "ComfyUI Workflow"
+PROVIDER_DALLE       = "DALL-E 3"
+PROVIDER_NOVELAI     = "NovelAI"
+PROVIDER_FLUX        = "FLUX"
 
 class ImageGenerator:
     """
@@ -56,7 +57,13 @@ class ImageGenerator:
         img_data: Optional[bytes] = None
 
         try:
-            if provider == PROVIDER_A1111 or provider == PROVIDER_COMFYUI:
+            if provider == PROVIDER_COMFY_WF:
+                logger.debug("Calling ComfyUI workflow image generation")
+                img_data = await self.generate_comfy_workflow(full_prompt, negative)
+                if img_data is None:
+                    logger.warning("[Media] ComfyUI workflow produced no image")
+
+            elif provider == PROVIDER_A1111 or provider == PROVIDER_COMFYUI:
                 logger.debug(f"Calling generate_a1111 with steps={steps}, width={width}, height={height}")
                 img_data = await self.generate_a1111(full_prompt, negative, width, height, steps)
 
@@ -87,6 +94,14 @@ class ImageGenerator:
             return None
 
     # Provider: Automatic1111 / ComfyUI-compatible WebUI
+    async def generate_comfy_workflow(self, prompt: str, negative: str) -> Optional[bytes]:
+        """Генерация через drop-in воркфлоу ComfyUI (app/data/workflows/image)."""
+        from app.utils.providers.comfy_image import ComfyUIImageGen
+        from app.utils.media.comfy_client import ComfyUIClient
+
+        gen = ComfyUIImageGen(ComfyUIClient())
+        return await gen.generate(prompt, negative)
+
     async def generate_a1111(
         self,
         prompt: str,

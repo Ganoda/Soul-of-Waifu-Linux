@@ -921,9 +921,35 @@ class TTSWorker(QThread):
         self.silero = SileroTTS_SOW_System()
         self.qwen = Qwen3TTS_SOW_System()
         self.eleven = ElevenLabs()
+        self.comfy_tts = None
+        self._comfy_warned = False
 
         self.playback_worker = AudioPlaybackWorker(self.device_index)
         self.playback_worker.start()
+
+    def _get_comfy_tts(self):
+        if self.comfy_tts is None:
+            from app.utils.providers.comfy_tts import ComfyUITTS
+            from app.utils.media.comfy_client import ComfyUIClient
+            self.comfy_tts = ComfyUITTS(ComfyUIClient())
+        return self.comfy_tts
+
+    def _generate_with_comfyui_fallback(self, loop, text) -> Optional[str]:
+        """ComfyUI-воркфлоу из drop-in папки; недоступен — Kokoro без падения."""
+        try:
+            out = loop.run_until_complete(
+                self._get_comfy_tts().generate(text, self.character_name)
+            )
+            if out:
+                return out
+            logger.warning("[Media] ComfyUI workflow produced no audio, falling back to Kokoro")
+        except Exception as e:
+            if not self._comfy_warned:
+                logger.warning("[Media] ComfyUI unavailable, falling back to Kokoro: %s", e)
+                self._comfy_warned = True
+        return loop.run_until_complete(
+            self.kokoro.generate_speech_with_kokoro(text, self.character_name)
+        )
 
     def add_text(self, text, message_id=None):
         if not text:
@@ -1130,6 +1156,8 @@ class TTSWorker(QThread):
                         output_file = loop.run_until_complete(
                             self.eleven.generate_speech_with_elevenlabs_sow_system(text, self.voice_id)
                         )
+                    elif self.tts_method == "ComfyUI":
+                        output_file = self._generate_with_comfyui_fallback(loop, text)
 
                     if self.discard_current:
                         logger.info("TTS finished, but was interrupted. Discarding audio.")
@@ -1231,6 +1259,8 @@ class PipelinedTTSWorker(QThread):
         self.silero = None
         self.qwen = None
         self.eleven = None
+        self.comfy_tts = None
+        self._comfy_warned = False
 
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._audio_buffer: Optional[asyncio.Queue] = None
@@ -1252,6 +1282,13 @@ class PipelinedTTSWorker(QThread):
         self.eleven = ElevenLabs()
         self._tts_engines_initialized = True
         logger.info(f"[PipelinedTTS] engines initialized for method='{self.tts_method}'")
+
+    def _get_comfy_tts_async(self):
+        if self.comfy_tts is None:
+            from app.utils.providers.comfy_tts import ComfyUITTS
+            from app.utils.media.comfy_client import ComfyUIClient
+            self.comfy_tts = ComfyUITTS(ComfyUIClient())
+        return self.comfy_tts
 
     def add_text(self, text, message_id=None):
         if not text:
@@ -1720,6 +1757,18 @@ class PipelinedTTSWorker(QThread):
             return await self.edge.generate_speech_with_edge_tts_sow_system(
                 text, self.character_name)
         elif method == "Kokoro":
+            return await self.kokoro.generate_speech_with_kokoro(
+                text, self.character_name)
+        elif method == "ComfyUI":
+            try:
+                out = await self._get_comfy_tts_async().generate(text, self.character_name)
+                if out:
+                    return out
+                logger.warning("[Media] ComfyUI workflow produced no audio, falling back to Kokoro")
+            except Exception as e:
+                if not self._comfy_warned:
+                    logger.warning("[Media] ComfyUI unavailable, falling back to Kokoro: %s", e)
+                    self._comfy_warned = True
             return await self.kokoro.generate_speech_with_kokoro(
                 text, self.character_name)
         elif method == "Silero":

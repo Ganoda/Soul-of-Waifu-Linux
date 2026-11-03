@@ -156,12 +156,26 @@ class STTWorker(QThread):
         super().__init__()
         self.queue = []
         self.is_running = True
-        
+
+        # Конфиг на Linux: llm.yaml → stt.* задаёт локальные веса Whisper
+        # (пустое значение ⇒ поведение библиотеки по умолчанию).
+        try:
+            from app.utils import xconfig as _xconfig
+            _stt = _xconfig.load("llm").get("stt", {}) or {}
+            if _stt.get("whisper_model_path"):
+                model_size = str(_stt["whisper_model_path"])
+            if _stt.get("device"):
+                device = str(_stt["device"])
+            if _stt.get("compute_type"):
+                compute_type = str(_stt["compute_type"])
+        except Exception as e:
+            logger.debug(f"STT config override skipped: {e}")
+
         self.model_size = model_size
         self.device = device
         self.compute_type = compute_type
-        
-        self.model = None 
+
+        self.model = None
 
     def load_model(self):
         if self.model is None:

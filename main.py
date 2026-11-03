@@ -861,6 +861,23 @@ if __name__ == "__main__":
         app_id = "com.jofizcd.soul_of_waifu.v2"
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
 
+    # XDG-конфиг: миграция легаси-JSON до любых чтений настроек
+    from app.configuration import paths as _paths
+    _paths.ensure_xdg_layout()
+    logging.getLogger("Config").info("[Config] root=%s", _paths.config_root())
+
+    # ui.yaml → платформа Qt под Wayland (xcb через XWayland по умолчанию)
+    try:
+        from app.utils import xconfig as _xconfig
+        _qt_platform = (_xconfig.load("ui").get("wayland.qt_platform") or "").strip()
+        if sys.platform != 'win32':
+            if not _qt_platform or _qt_platform == "auto":
+                os.environ.pop("QT_QPA_PLATFORM", None)
+            else:
+                os.environ["QT_QPA_PLATFORM"] = _qt_platform
+    except Exception as _e:
+        logging.getLogger("Config").warning("[Config] ui.yaml platform hint skipped: %s", _e)
+
     app = QApplication(sys.argv)
 
     loop = QEventLoop(app)
