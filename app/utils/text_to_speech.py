@@ -25,13 +25,17 @@ from qwen_tts import Qwen3TTSModel
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from app.configuration import configuration
-from rvc_python.infer import RVCInference
+
+try:
+    from rvc_python.infer import RVCInference
+except ImportError:
+    RVCInference = None
 
 import torch.serialization
 try:
     from fairseq.data.dictionary import Dictionary
     torch.serialization.add_safe_globals([Dictionary])
-except ImportError:
+except Exception:
     pass
 
 logger = logging.getLogger("Text-To-Speech Module")

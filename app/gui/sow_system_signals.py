@@ -151,7 +151,7 @@ class Soul_Of_Waifu_System(QtCore.QObject):
         self.emotion_resources = {
             emotion: {
                 "image": emotion,
-                "live2d_emotion": f"{emotions_path}\\{emotion}_animation.exp3.json",
+                "live2d_emotion": f"{emotions_path}/{emotion}_animation.exp3.json",
             }
             for emotion in [
                 "admiration", "amusement", "anger", "annoyance", "approval", "caring",

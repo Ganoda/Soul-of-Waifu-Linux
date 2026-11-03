@@ -1,3 +1,13 @@
 app/configuration/api.json
 app/configuration/settings.json
 app/configuration/characters.json
+logs/
+__pycache__/
+*.pyc
+.venv/
+.soul_stage/
+.soul_stage*/
+app/cache/
+app/utils/ai_clients/backend/
+.pytest_cache/
+.superpowers/
