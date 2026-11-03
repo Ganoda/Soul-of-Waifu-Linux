@@ -1,0 +1,12 @@
+{
+  "3": {
+    "class_type": "PrimitiveString",
+    "inputs": { "value": "" },
+    "_meta": { "title": "Text to speak" }
+  },
+  "9": {
+    "class_type": "SaveAudio",
+    "inputs": {},
+    "_meta": { "title": "Save Audio" }
+  }
+}
