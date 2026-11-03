@@ -1,0 +1,7 @@
+# Интерфейс: тема, Wayland, горячие клавиши
+theme: system                # system|dark|light (pass-through, Phase-B hook)
+wayland:
+  qt_platform: xcb           # xcb|wayland|"auto" — consumed by start.sh/main.py
+hotkeys:
+  panic_hide: ctrl+alt+h     # reserved; not bound yet (Phase-B)
+window_geometry_save: true

@@ -1,0 +1,11 @@
+# Локальные медиа-бэкенды (ComfyUI, воркфлоу, порядок TTS/провайдеров)
+comfyui:
+  enabled: true
+  base_url: http://127.0.0.1:8188
+  timeout_s: 300
+  poll_interval_s: 0.5
+  cache_dir: app/cache/comfy
+workflows_dir: app/data/workflows
+tts_engine_order: [comfyui, kokoro]
+image_provider_order: [comfyui-workflow, a1111, cloud]
+video_enabled: false

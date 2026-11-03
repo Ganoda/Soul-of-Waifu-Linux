@@ -1,0 +1,18 @@
+# Параметры локальной нейросети и STT
+backend: http://127.0.0.1:8080      # OpenAI-compatible: llama-server / vLLM / Ollama
+api_key: ""                          # "ollama" style dummy accepted
+model: gemma4-abliterated            # served model name
+ctx: 16384
+temperature: 0.85
+repeat_penalty: 1.05
+stop_tokens: ["<end_of_turn>"]
+presets:
+  gemma4-abliterated:
+    chat_template: "<start_of_turn>user\n{user}<end_of_turn>\n<start_of_turn>model\n"
+    eos_token: "<end_of_turn>"
+    bos_token: "<start_of_turn>"
+    # template vars follow llama.cpp conventions
+stt:
+  whisper_model_path: "models/whisper/small-fp16"   # local weights; empty ⇒ library default download
+  device: cuda
+  compute_type: float16
