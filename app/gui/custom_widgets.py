@@ -9115,7 +9115,7 @@ class ImageGenSettingsDialog(QDialog):
         self.cb_provider = QComboBox()
         self.cb_provider.setObjectName("IGProviderCombo")
         self.cb_provider.setFont(self.f_input)
-        self.cb_provider.addItems(["Automatic1111", "ComfyUI (A1111 API)", "DALL-E 3", "NovelAI", "FLUX"])
+        self.cb_provider.addItems(["Automatic1111", "ComfyUI (A1111 API)", "ComfyUI Workflow", "DALL-E 3", "NovelAI", "FLUX"])
         current_prov = self.configuration_settings.get_main_setting("image_provider") or "Automatic1111"
         self.cb_provider.setCurrentText(current_prov)
         self.cb_provider.setStyleSheet(self._s_combo("IGProviderCombo"))

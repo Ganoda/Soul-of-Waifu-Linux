@@ -12,6 +12,7 @@ root on first use; existing files at the target are never overwritten.
 import logging
 import os
 import shutil
+import sys
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,10 @@ def config_root() -> Path:
     env_dir = os.environ.get("SOW_CONFIG_DIR")
     if env_dir:
         return Path(env_dir).expanduser()
+    # Windows (upstream builds) keeps legacy per-repo JSON location;
+    # Linux/Wayland uses the XDG hierarchy.
+    if sys.platform == "win32":
+        return repo_config_dir()
     xdg = os.environ.get("XDG_CONFIG_HOME")
     base = Path(xdg) if xdg else Path.home() / ".config"
     return base / "soul-of-waifu"
@@ -56,7 +61,7 @@ def ensure_xdg_layout(migrate: bool = True) -> bool:
     root = config_root()
     root.mkdir(parents=True, exist_ok=True)
 
-    if not migrate or _migrated:
+    if not migrate or _migrated or sys.platform == "win32":
         return False
 
     repo_cfg = repo_config_dir()

@@ -8492,7 +8492,8 @@ class InterfaceSignals():
             ("Edge TTS", "app/gui/icons/tts_logo/edgetts.png"),
             ("Kokoro", "app/gui/icons/tts_logo/kokorotts.png"),
             ("Silero (RU)", "app/gui/icons/tts_logo/silerotts.png"),
-            ("Qwen-3 TTS", "app/gui/icons/tts_logo/qwentts.png")
+            ("Qwen-3 TTS", "app/gui/icons/tts_logo/qwentts.png"),
+            ("ComfyUI", "app/gui/icons/tts_logo/kokorotts.png")
         ]
 
         for name, icon_path in engines_data:
@@ -8521,6 +8522,7 @@ class InterfaceSignals():
         stacked_widget.addWidget(self.create_kokoro_widgets(character_name, voice_type, rvc_enabled, rvc_file))
         stacked_widget.addWidget(self.create_silero_widgets(character_name, voice_type, rvc_enabled, rvc_file))
         stacked_widget.addWidget(self.create_qwen3_widgets(character_name, voice_type, rvc_enabled, rvc_file))
+        stacked_widget.addWidget(self.create_comfyui_widgets(character_name))
         
         content_layout.addWidget(stacked_widget)
         main_layout.addWidget(content_frame, 1)
@@ -8540,7 +8542,8 @@ class InterfaceSignals():
             "Edge TTS": 3,
             "Kokoro": 4,
             "Silero": 5,
-            "Qwen-3 TTS": 6
+            "Qwen-3 TTS": 6,
+            "ComfyUI": 7
         }
         
         row_idx = engine_map.get(current_text_to_speech, 0)
@@ -10235,6 +10238,41 @@ class InterfaceSignals():
             sow_toast(parent=self.main_window, title="Qwen 3 TTS", text="Settings saved successfully!", msg_type="success")
 
         select_voice_button.clicked.connect(save_qwen_settings)
+
+        widget = QWidget()
+        widget.setLayout(layout)
+        return widget
+
+    def create_comfyui_widgets(self, character_name):
+        """Страница TTS-движка ComfyUI: воркфлоу берутся из drop-in папки."""
+        layout = QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(18)
+
+        info = QLabel()
+        info.setText(
+            "ComfyUI TTS работает через drop-in воркфлоу.\n\n"
+            "1. Запустите локальный ComfyUI (по умолчанию http://127.0.0.1:8188).\n"
+            "2. Экспортируйте воркфлоу кнопкой Save (API Format).\n"
+            "3. Положите .json в app/data/workflows/tts/.\n"
+            "4. Опционально создайте <имя>.meta.yaml с text_node_id / output_node_id.\n\n"
+            "Первая найденная папка/json станет активным пресетом. Если ComfyUI\n"
+            "недоступен — озвучка автоматически уйдёт на встроенный Kokoro."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("font-size: 13px; line-height: 1.5;")
+        layout.addWidget(info)
+
+        def save_comfyui_settings():
+            configuration_data = self.configuration_characters.load_configuration()
+            char_cfg = configuration_data["character_list"][character_name]
+            char_cfg["current_text_to_speech"] = "ComfyUI"
+            self.configuration_characters.save_configuration_edit(configuration_data)
+            sow_toast(parent=self.main_window, title="ComfyUI", text="Settings saved successfully!", msg_type="success")
+
+        select_voice_button = QPushButton("Save")
+        select_voice_button.clicked.connect(save_comfyui_settings)
+        layout.addWidget(select_voice_button)
 
         widget = QWidget()
         widget.setLayout(layout)

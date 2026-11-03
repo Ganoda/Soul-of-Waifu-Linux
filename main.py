@@ -878,6 +878,13 @@ if __name__ == "__main__":
     except Exception as _e:
         logging.getLogger("Config").warning("[Config] ui.yaml platform hint skipped: %s", _e)
 
+    # Регистрация провайдеров провайдер-слоя (llm/tts/stt/image)
+    try:
+        from app.utils.providers.kokoro_adapter import register_defaults
+        register_defaults()
+    except Exception as _e:
+        logging.getLogger("Config").warning("[Config] provider registration skipped: %s", _e)
+
     app = QApplication(sys.argv)
 
     loop = QEventLoop(app)

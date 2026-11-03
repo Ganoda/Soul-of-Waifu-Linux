@@ -25,7 +25,9 @@ source .venv/bin/activate
 export VIRTUAL_ENV="$PWD/.venv"
 
 # [3/3] runtime env for Linux/Wayland specifics
-export SOW_CONFIG_DIR="${SOW_CONFIG_DIR:-$HOME/.config/soul-of-waifu}"
+# XDG-корень резолвится в app/configuration/paths.py
+# (SOW_CONFIG_DIR > XDG_CONFIG_HOME > ~/.config/soul-of-waifu);
+# здесь ничего не форсируем, чтобы не перекрывать XDG_CONFIG_HOME.
 export HF_HOME="$PWD/app/models/hf_cache"
 # QtWebEngine needs no-sandbox without privileged helper user namespaces config:
 export QTWEBENGINE_CHROMIUM_FLAGS="${QTWEBENGINE_CHROMIUM_FLAGS:---no-sandbox}"

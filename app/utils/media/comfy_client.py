@@ -28,6 +28,7 @@ def _cfg():
     c = xconfig.load("media")
     return {
         "base_url": c.get("comfyui.base_url", "http://127.0.0.1:8188"),
+        "enabled": bool(c.get("comfyui.enabled", True)),
         "timeout_s": int(c.get("comfyui.timeout_s", 300)),
         "poll_interval_s": float(c.get("comfyui.poll_interval_s", 0.5)),
         "cache_dir": str(c.get("comfyui.cache_dir", "app/cache/comfy")),
@@ -39,6 +40,7 @@ class ComfyUIClient:
                  cache_dir=None):
         cfg = _cfg()
         self.base_url = (base_url or cfg["base_url"]).rstrip("/")
+        self.enabled = bool(cfg.get("enabled", True))
         self.timeout_s = int(timeout_s if timeout_s is not None else cfg["timeout_s"])
         self.poll_interval_s = float(
             poll_interval_s if poll_interval_s is not None else cfg["poll_interval_s"]
@@ -71,6 +73,9 @@ class ComfyUIClient:
     async def run(self, workflow: Mapping, *, node_inputs: Mapping[str, Mapping] = {},
                   prefix: str = "job", cache_dir=None) -> dict:
         out_dir = Path(cache_dir) if cache_dir else self.cache_dir
+
+        if not self.enabled:
+            raise ComfyUIUnavailable("ComfyUI disabled in media.yaml (comfyui.enabled: false)")
 
         if self._healthy is not True and not (await self.ping()):
             raise ComfyUIUnavailable(f"ComfyUI unreachable at {self.base_url}")

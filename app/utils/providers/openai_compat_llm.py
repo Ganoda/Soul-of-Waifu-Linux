@@ -9,7 +9,13 @@ logger = logging.getLogger("LLMProvider")
 
 class OpenAICompatLLM:
     def __init__(self, base_url: str, api_key: str = "", model: str = ""):
-        self.base_url = base_url.rstrip("/")
+        base = base_url.rstrip("/")
+        # Канонический контракт OpenAI-compat: {base}/v1/chat/completions.
+        # Пользователь может вписать и с /v1, и без — нормализуем к /v1-форме.
+        if not base.endswith("/v1"):
+            base = f"{base}/v1"
+        self.base_url = base
+        self.chat_url = f"{self.base_url}/chat/completions"
         self.api_key = api_key
         self.model = model
         self._session: aiohttp.ClientSession | None = None
@@ -31,7 +37,7 @@ class OpenAICompatLLM:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
-        url = f"{self.base_url}/chat/completions"
+        url = self.chat_url
         try:
             async with session.post(url, json=payload, headers=headers) as resp:
                 resp.raise_for_status()
