@@ -70,6 +70,12 @@ from app.utils.discord_manager import DiscordBotManager
 
 RESIZE_GRIP_SIZE = 8
 
+# Версия сборки и источник проверок обновлений. Форк проверяет свои релизы
+# (Ganoda/Soul-of-Waifu-Linux), а не апстрим jofizcd/Soul-of-Waifu — иначе баннер
+# предлагает обновиться до неподходящей для форка версии.
+APP_VERSION = "v2.4.7"
+UPDATES_RELEASES_URL = "https://api.github.com/repos/Ganoda/Soul-of-Waifu-Linux/releases/latest"
+
 class _EdgeResizeGrip(QtWidgets.QWidget):
     def __init__(self, window: QtWidgets.QMainWindow, edges: QtCore.Qt.Edge,
                  cursor: QtCore.Qt.CursorShape, parent=None):
@@ -233,7 +239,7 @@ class MainWindow(QMainWindow):
         self.ui.pushButton_rp_editors.setText(self.translations.get("rp_editors_button", " RP Editors"))
         self.ui.pushButton_soul_stage.setText(self.translations.get("soul_stage_button", " Soul Stage"))
         self.ui.pushButton_options.setText(self.translations.get("options_button", " Options"))
-        self.ui.version_label.setText(self.translations.get("version_label", "v2.4.7"))
+        self.ui.version_label.setText(self.translations.get("version_label", APP_VERSION))
         
         # Main Tab Without Characters
         self.ui.main_no_characters_advice_label.setText(self.translations.get("no_characters_advice", "You haven\'t added any characters. Click on the button and create it"))
@@ -610,8 +616,11 @@ class MainWindow(QMainWindow):
         
     def check_for_updates(self, current_version):
         try:
-            repo_url = "https://api.github.com/repos/jofizcd/Soul-of-Waifu/releases/latest"
+            repo_url = UPDATES_RELEASES_URL
             response = requests.get(repo_url, timeout=10)
+            if response.status_code == 404:
+                logger.info("Update check skipped: no releases published in Ganoda/Soul-of-Waifu-Linux yet.")
+                return None, None
             response.raise_for_status()
             latest_release = response.json()
             latest_version = latest_release["tag_name"]
@@ -897,7 +906,7 @@ if __name__ == "__main__":
 
     main_window.show()    
 
-    current_version = "v2.4.7"
+    current_version = APP_VERSION
 
     def deferred_update_check():
         latest_version, github_url = main_window.check_for_updates(current_version)

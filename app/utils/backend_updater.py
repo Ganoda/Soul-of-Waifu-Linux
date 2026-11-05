@@ -3,6 +3,7 @@ import json
 import shutil
 import zipfile
 import asyncio
+import platform
 import aiohttp
 import logging
 from pathlib import Path
@@ -45,7 +46,13 @@ class LlamaUpdater(QtCore.QObject):
     def _match_assets(self, assets: list, backend_type: str) -> list:
         matched_urls = []
         backend_type = backend_type.lower()
-        
+
+        # Linux-гвард: активы llama.cpp для Windows ("llama-...-bin-win-*.zip")
+        # несовместимы с окружением Linux, поэтому не подбираем их молча —
+        # класс "No compatible binary found" из диалога остаётся честным.
+        if platform.system() != "Windows":
+            return []
+
         def matches(name, keywords):
             return all(kw in name for kw in keywords) and "arm64" not in name
 
@@ -75,6 +82,18 @@ class LlamaUpdater(QtCore.QObject):
         return matched_urls
 
     async def download_and_install(self, asset_urls: list, backend_type: str, version_tag: str):
+        # Linux-гвард: не качаем Windows-архивы и не распаковываем .exe/.dll в Linux-
+        # окружение. llama.cpp ставится системно (например, `sudo pacman -S llama.cpp`)
+        # либо указывается внешний бэкенд в llm.yaml.
+        if platform.system() != "Windows":
+            self.finished_signal.emit(
+                False,
+                "Auto-update of the llama.cpp engine is Windows-only. "
+                "On Linux install it system-wide (e.g. 'sudo pacman -S llama.cpp') "
+                "or point llm.yaml at an external backend.",
+            )
+            return
+
         target_folder = self.backend_dir / backend_type.lower()
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         
