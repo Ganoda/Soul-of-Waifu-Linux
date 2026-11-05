@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Soul of Waifu
+GenericName=AI Companion
+Comment=Soul of Waifu (Linux fork) — AI companion with Live2D avatars, local LLM, TTS/STT and ComfyUI integration
+Exec=@INSTALL_DIR@/sow-gui.sh
+Path=@INSTALL_DIR@
+TryExec=@INSTALL_DIR@/sow-gui.sh
+Icon=soul-of-waifu
+Terminal=false
+Categories=Utility;Chat;
+Keywords=waifu;soul;ai;companion;llm;tts;
+StartupWMClass=Soul of Waifu
+X-GNOME-UsesNotifications=false

@@ -346,6 +346,23 @@ else
     warn "Core import check failed — inspect the pip output above."
 fi
 
+# ---------------------------------------------------------------------------
+echo
+log "[9/8] Registering desktop entry (application launcher)..."
+APPS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+ICON_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/256x256/apps"
+mkdir -p "$APPS_DIR" "$ICON_DIR"
+if cp packaging/icon.png "$ICON_DIR/soul-of-waifu.png" 2>/dev/null; then
+        sed "s|@INSTALL_DIR@|$APP_DIR|g" packaging/soul-of-waifu.desktop \
+        > "$APPS_DIR/soul-of-waifu.desktop"
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database "$APPS_DIR" 2>/dev/null || true
+    fi
+    log "  launcher entry installed: $APPS_DIR/soul-of-waifu.desktop"
+else
+    warn "  packaging/icon.png missing — skipping desktop entry registration."
+fi
+
 echo
 echo "=============================================================="
 echo "  Installation finished!"
