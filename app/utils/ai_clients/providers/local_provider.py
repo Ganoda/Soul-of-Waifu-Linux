@@ -13,10 +13,23 @@ REASONING_EFFORT_TO_BUDGET = {
 }
 
 class LocalProvider(BaseAIProvider):
-    def __init__(self, port: int = 48596, advanced_params: dict = None):
-        self.base_url = f"http://127.0.0.1:{port}/v1"
-        self.api_key = "no-key-required"
+    def __init__(self, port: int = 48596, advanced_params: dict = None,
+                 base_url: str = None, api_key: str = None,
+                 model: str = "local-model", sampling_defaults: dict = None):
+        if base_url:
+            # Canonical OpenAI-compat URL is {base}/v1/chat/completions;
+            # the /v1 suffix is appended the same way the provider layer's
+            # OpenAICompatLLM does, so the user may enter the address either way.
+            base = base_url.rstrip("/")
+            if not base.endswith("/v1"):
+                base = f"{base}/v1"
+            self.base_url = base
+        else:
+            self.base_url = f"http://127.0.0.1:{port}/v1"
+        self.api_key = api_key or "no-key-required"
+        self.model = model
         self.advanced_params = advanced_params or {}
+        self.sampling_defaults = sampling_defaults or {}
 
         self.client = AsyncOpenAI(
             base_url=self.base_url,
@@ -26,6 +39,12 @@ class LocalProvider(BaseAIProvider):
                 limits=httpx.Limits(max_connections=5, max_keepalive_connections=2)
             )
         )
+
+    def _param(self, kwargs: dict, key: str, fallback):
+        """Request parameter: caller wins, then llm.yaml default, then builtin."""
+        if key in kwargs:
+            return kwargs[key]
+        return self.sampling_defaults.get(key, fallback)
 
     def _connection_error_message(self, e: Exception) -> str:
         logger.error(f"Local API Connection Error: {e}")
@@ -48,21 +67,24 @@ class LocalProvider(BaseAIProvider):
 
     async def generate_stream(self, messages: list[dict], **kwargs):
         payload = {
-            "model": "local-model",
+            "model": self.model,
             "messages": messages,
             "stream": True,
             "max_tokens": kwargs.get("max_tokens", 1000),
-            "temperature": kwargs.get("temperature", 0.7),
+            "temperature": self._param(kwargs, "temperature", 0.7),
             "top_p": kwargs.get("top_p", 0.9),
             "frequency_penalty": kwargs.get("frequency_penalty", 0.0),
             "presence_penalty": kwargs.get("presence_penalty", 0.0),
         }
 
-        stop_sequences = kwargs.get("stop")
+        stop_sequences = self._param(kwargs, "stop", None)
         if stop_sequences:
             payload["stop"] = stop_sequences
 
         extra_body = dict(self.advanced_params) if self.advanced_params else {}
+        repeat_penalty = self._param(kwargs, "repeat_penalty", None)
+        if repeat_penalty is not None:
+            extra_body["repeat_penalty"] = repeat_penalty
         self._apply_thinking_budget(extra_body, kwargs, payload)
         if extra_body:
             payload["extra_body"] = extra_body
@@ -80,23 +102,29 @@ class LocalProvider(BaseAIProvider):
 
     async def generate_summary(self, messages: list[dict], **kwargs):
         payload = {
-            "model": "local-model",
+            "model": self.model,
             "messages": messages,
             "stream": True,
             "max_tokens": kwargs.get("max_tokens", 1000),
-            "temperature": kwargs.get("temperature", 0.5),
+            "temperature": self._param(kwargs, "temperature", 0.5),
             "top_p": kwargs.get("top_p", 0.9),
             "frequency_penalty": kwargs.get("frequency_penalty", 0.8),
             "presence_penalty": kwargs.get("presence_penalty", 0.3)
         }
 
-        stop_sequences = kwargs.get("stop")
+        stop_sequences = self._param(kwargs, "stop", None)
         if stop_sequences:
             payload["stop"] = stop_sequences
 
         reasoning_mode = kwargs.get("reasoning_mode", False)
+        extra_body = {}
         if reasoning_mode is False:
-            payload["extra_body"] = {"thinking_budget_tokens": 0}
+            extra_body["thinking_budget_tokens"] = 0
+        repeat_penalty = self._param(kwargs, "repeat_penalty", None)
+        if repeat_penalty is not None:
+            extra_body["repeat_penalty"] = repeat_penalty
+        if extra_body:
+            payload["extra_body"] = extra_body
 
         try:
             completion = await self.client.chat.completions.create(**payload)
@@ -112,15 +140,15 @@ class LocalProvider(BaseAIProvider):
 
     async def generate(self, messages: list[dict], tools: list = None, **kwargs) -> dict:
         payload = {
-            "model": "local-model",
+            "model": self.model,
             "messages": messages,
             "stream": False,
             "max_tokens": kwargs.get("max_tokens", 1000),
-            "temperature": kwargs.get("temperature", 0.7),
+            "temperature": self._param(kwargs, "temperature", 0.7),
             "top_p": kwargs.get("top_p", 0.9),
         }
 
-        stop_sequences = kwargs.get("stop")
+        stop_sequences = self._param(kwargs, "stop", None)
         if stop_sequences:
             payload["stop"] = stop_sequences
 
@@ -129,6 +157,9 @@ class LocalProvider(BaseAIProvider):
             payload["tool_choice"] = "auto"
 
         extra_body = dict(self.advanced_params) if self.advanced_params else {}
+        repeat_penalty = self._param(kwargs, "repeat_penalty", None)
+        if repeat_penalty is not None:
+            extra_body["repeat_penalty"] = repeat_penalty
         reasoning_mode = kwargs.get("reasoning_mode")
         if reasoning_mode is False:
             extra_body["thinking_budget_tokens"] = 0

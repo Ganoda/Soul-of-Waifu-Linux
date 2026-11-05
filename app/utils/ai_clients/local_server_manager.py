@@ -12,6 +12,7 @@ import yaml
 import psutil
 
 from app.configuration import configuration
+from app.utils.ai_clients.llm_config import external_backend
 
 logger = logging.getLogger("Local Server Manager")
 
@@ -400,6 +401,14 @@ class LocalServerManager:
 
     async def ensure_server_running(self):
         async with self.restart_lock:
+            # External backend configured in llm.yaml: the app never spawns
+            # its own llama-server, the user runs that server themselves.
+            if external_backend() is not None:
+                logger.info("External LLM backend configured in llm.yaml, skipping embedded llama-server launch.")
+                self.model_loaded = True
+                self.update_ui_for_server_state(True)
+                return
+
             if self.is_server_already_running():
                 self.model_loaded = True
                 self.update_ui_for_server_state(True)

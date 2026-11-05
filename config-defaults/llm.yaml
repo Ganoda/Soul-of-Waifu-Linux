@@ -1,5 +1,5 @@
 # Параметры локальной нейросети и STT
-backend: http://127.0.0.1:8080      # OpenAI-compatible: llama-server / vLLM / Ollama
+backend: ""                         # OpenAI-compat адрес (llama-server / vLLM / Ollama), напр. http://127.0.0.1:8080; пусто ⇒ встроенный llama-server
 api_key: ""                          # "ollama" style dummy accepted
 model: gemma4-abliterated            # served model name
 ctx: 16384

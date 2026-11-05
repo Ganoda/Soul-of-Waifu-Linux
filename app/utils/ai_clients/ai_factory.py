@@ -11,6 +11,7 @@ from app.utils.ai_clients.providers.grok_provider import GrokProvider
 from app.utils.ai_clients.providers.qwen_provider import QwenProvider
 from app.utils.ai_clients.providers.zai_provider import ZAIProvider
 from app.utils.ai_clients.providers.player2_provider import Player2Provider
+from app.utils.ai_clients.llm_config import external_backend
 
 logger = logging.getLogger("AI Factory")
 
@@ -100,6 +101,18 @@ class AIFactory:
                     dyn_range = (float(dyn_temp_max) - float(dyn_temp_min)) / 2.0
                     if dyn_range > 0:
                         advanced_params["dynatemp_range"] = dyn_range
+
+            # llm.yaml "backend" pointing at a user-run OpenAI-compatible
+            # server wins over the embedded llama-server launcher.
+            external = external_backend()
+            if external:
+                return LocalProvider(
+                    base_url=external["base_url"],
+                    api_key=external["api_key"] or None,
+                    model=external["model"],
+                    advanced_params=advanced_params,
+                    sampling_defaults=external["sampling_defaults"]
+                )
 
             return LocalProvider(port=48596, advanced_params=advanced_params)
 

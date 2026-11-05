@@ -31,6 +31,19 @@ api_key: ""                      # пусто или фиктивный ("ollama
 model: gemma4-abliterated        # имя, под которым сервер отдаёт модель
 ```
 
+Заполненный `backend` означает: приложение ходит на этот адрес напрямую
+(`POST {backend}/v1/chat/completions`, имя модели подставляется из
+`model`) и **не запускает встроенный llama-server**. Адрес можно писать
+и с суффиксом `/v1`, и без него — нормализация автоматическая. Пустой
+`backend` ⇒ прежнее поведение: приложение само ищет бинари
+`app/utils/ai_clients/backend/{cpu,vulkan,cuda,hip,sycl}/llama-server`
+и запускает его на порту 48596.
+
+`ctx` — параметр самого сервера (смотри команду выше или флаг
+`--ctx-size` встроенного запуска), остальные сэмплеры читаются из
+llm.yaml и уходят в каждый запрос. Явные настройки сэмплинга в GUI
+приоритетнее значений из llm.yaml.
+
 Сервер llama.cpp сам применяет chat-template из GGUF; токены Gemma для
 справки (они же — дефолт в llm.yaml):
 
@@ -42,8 +55,8 @@ model: gemma4-abliterated        # имя, под которым сервер о
 
 Шаблон хода целиком: `<start_of_turn>user\n{user}<end_of_turn>\n<start_of_turn>model\n`.
 
-Параметры сэмплинга (`ctx`, `temperature`, `repeat_penalty`,
-`stop_tokens`) правятся там же и читаются при старте.
+Параметры сэмплинга (`temperature`, `repeat_penalty`, `stop_tokens`)
+правятся там же и читаются при старте.
 
 ## 4. STT без сети
 

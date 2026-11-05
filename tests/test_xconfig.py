@@ -41,7 +41,8 @@ def test_corrupt_yaml_falls_back_to_defaults(config_root):
     (config_root).mkdir(parents=True, exist_ok=True)
     (config_root / "llm.yaml").write_text("{ this is: not: valid")
     cfg = xconfig.load("llm")
-    assert cfg.get("backend") == "http://127.0.0.1:8080"
+    # Empty backend by default: means "use the embedded llama-server launcher"
+    assert cfg.get("backend") == ""
 
 
 def test_user_edited_value_survives_new_session(config_root):
