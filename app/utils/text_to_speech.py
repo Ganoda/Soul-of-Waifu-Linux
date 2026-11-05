@@ -48,6 +48,30 @@ os.environ["HUGGINGFACE_HUB_CACHE"] = CACHE_DIR
 
 os.makedirs(CACHE_DIR, exist_ok=True)
 
+
+def log_tts_engine_fallback(owner, method, next_method, exc=None):
+    """Log a fallback hop of the tts_engine_order chain (deduplicated).
+
+    Keeps the historical ComfyUI->Kokoro wording so existing log users and
+    wiring expectations stay recognizable.
+    """
+    warned = getattr(owner, "_fallback_warned", None)
+    if warned is None:
+        warned = set()
+        owner._fallback_warned = warned
+    key = (method, next_method, exc is None)
+    level = logging.WARNING if key not in warned else logging.DEBUG
+    warned.add(key)
+    if method == "ComfyUI" and next_method == "Kokoro":
+        detail = f": {exc}" if exc else ""
+        logger.log(level, "[Media] ComfyUI workflow produced no audio, falling back to Kokoro%s"
+                   if exc is None else "[Media] ComfyUI unavailable, falling back to Kokoro%s", detail)
+    else:
+        detail = f" ({exc})" if exc else ""
+        logger.log(level, "[Media] TTS engine %r gave no audio%s, trying next engine %r from tts_engine_order",
+                   method, detail, next_method)
+
+
 def fix_rvc_sample_rate(file_path, base_file_path=None, target_sr=48000):
     if not file_path or not os.path.exists(file_path):
         return file_path
@@ -922,7 +946,7 @@ class TTSWorker(QThread):
         self.qwen = Qwen3TTS_SOW_System()
         self.eleven = ElevenLabs()
         self.comfy_tts = None
-        self._comfy_warned = False
+        self._fallback_warned = set()
 
         self.playback_worker = AudioPlaybackWorker(self.device_index)
         self.playback_worker.start()
@@ -935,21 +959,58 @@ class TTSWorker(QThread):
         return self.comfy_tts
 
     def _generate_with_comfyui_fallback(self, loop, text) -> Optional[str]:
-        """ComfyUI-воркфлоу из drop-in папки; недоступен — Kokoro без падения."""
-        try:
-            out = loop.run_until_complete(
+        """Legacy entry point: ComfyUI workflow, падение — на Kokoro."""
+        from app.utils.providers.comfy_tts import configured_tts_chain
+        return self._run_chain(configured_tts_chain(self.tts_method), loop, text)
+
+    def _generate_with_engine_chain(self, loop, text) -> Optional[str]:
+        """Phase-B: порядок попыток задаёт media.yaml:tts_engine_order.
+
+        Выбор GUI (self.tts_method) всегда первый; остальные элементы
+        списка — фолбэки на случай ошибки/пустого результата.
+        """
+        from app.utils.providers.comfy_tts import configured_tts_chain
+        return self._run_chain(configured_tts_chain(self.tts_method), loop, text)
+
+    def _run_chain(self, chain, loop, text) -> Optional[str]:
+        from app.utils.providers.comfy_tts import run_fallback_chain
+        return run_fallback_chain(
+            chain,
+            lambda method: self._dispatch_engine(method, loop, text),
+            on_fallback=lambda cur, nxt, exc: log_tts_engine_fallback(self, cur, nxt, exc),
+        )
+
+    def _dispatch_engine(self, method, loop, text) -> Optional[str]:
+        if method == "XTTSv2":
+            return loop.run_until_complete(
+                self.xtts.generate_speech_with_xttsv2_sow_system(text, self.language, self.character_name)
+            )
+        elif method == "Edge TTS":
+            return loop.run_until_complete(
+                self.edge.generate_speech_with_edge_tts_sow_system(text, self.character_name)
+            )
+        elif method == "Kokoro":
+            return loop.run_until_complete(
+                self.kokoro.generate_speech_with_kokoro(text, self.character_name)
+            )
+        elif method == "Silero":
+            return loop.run_until_complete(
+                self.silero.generate_speech_with_silero(text, self.character_name)
+            )
+        elif method == "Qwen-3 TTS":
+            return loop.run_until_complete(
+                self.qwen.generate_speech_with_qwen3(text, self.character_name)
+            )
+        elif method == "ElevenLabs":
+            return loop.run_until_complete(
+                self.eleven.generate_speech_with_elevenlabs_sow_system(text, self.voice_id)
+            )
+        elif method == "ComfyUI":
+            return loop.run_until_complete(
                 self._get_comfy_tts().generate(text, self.character_name)
             )
-            if out:
-                return out
-            logger.warning("[Media] ComfyUI workflow produced no audio, falling back to Kokoro")
-        except Exception as e:
-            if not self._comfy_warned:
-                logger.warning("[Media] ComfyUI unavailable, falling back to Kokoro: %s", e)
-                self._comfy_warned = True
-        return loop.run_until_complete(
-            self.kokoro.generate_speech_with_kokoro(text, self.character_name)
-        )
+        logger.error(f"Unsupported TTS method: {method}")
+        return None
 
     def add_text(self, text, message_id=None):
         if not text:
@@ -1130,34 +1191,7 @@ class TTSWorker(QThread):
                 if text:
                     self.discard_current = False
                     logger.info(f"Generating Audio for: {text[:30]}...")
-                    output_file = None
-
-                    if self.tts_method == "XTTSv2":
-                        output_file = loop.run_until_complete(
-                            self.xtts.generate_speech_with_xttsv2_sow_system(text, self.language, self.character_name)
-                        )
-                    elif self.tts_method == "Edge TTS":
-                        output_file = loop.run_until_complete(
-                            self.edge.generate_speech_with_edge_tts_sow_system(text, self.character_name)
-                        )
-                    elif self.tts_method == "Kokoro":
-                        output_file = loop.run_until_complete(
-                            self.kokoro.generate_speech_with_kokoro(text, self.character_name)
-                        )
-                    elif self.tts_method == "Silero":
-                        output_file = loop.run_until_complete(
-                            self.silero.generate_speech_with_silero(text, self.character_name)
-                        )
-                    elif self.tts_method == "Qwen-3 TTS":
-                        output_file = loop.run_until_complete(
-                            self.qwen.generate_speech_with_qwen3(text, self.character_name)
-                        )
-                    elif self.tts_method == "ElevenLabs":
-                        output_file = loop.run_until_complete(
-                            self.eleven.generate_speech_with_elevenlabs_sow_system(text, self.voice_id)
-                        )
-                    elif self.tts_method == "ComfyUI":
-                        output_file = self._generate_with_comfyui_fallback(loop, text)
+                    output_file = self._generate_with_engine_chain(loop, text)
 
                     if self.discard_current:
                         logger.info("TTS finished, but was interrupted. Discarding audio.")
@@ -1260,7 +1294,7 @@ class PipelinedTTSWorker(QThread):
         self.qwen = None
         self.eleven = None
         self.comfy_tts = None
-        self._comfy_warned = False
+        self._fallback_warned = set()
 
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._audio_buffer: Optional[asyncio.Queue] = None
@@ -1749,7 +1783,19 @@ class PipelinedTTSWorker(QThread):
                 pass
 
     async def _generate_wav(self, text: str) -> Optional[str]:
-        method = self.tts_method
+        """Phase-B: порядок попыток задаёт media.yaml:tts_engine_order.
+
+        Выбор GUI (self.tts_method) всегда первый; остальные элементы
+        списка — фолбэки на случай ошибки/пустого результата.
+        """
+        from app.utils.providers.comfy_tts import arun_fallback_chain, configured_tts_chain
+        return await arun_fallback_chain(
+            configured_tts_chain(self.tts_method),
+            lambda method: self._dispatch_engine_async(method, text),
+            on_fallback=lambda cur, nxt, exc: log_tts_engine_fallback(self, cur, nxt, exc),
+        )
+
+    async def _dispatch_engine_async(self, method: str, text: str) -> Optional[str]:
         if method == "XTTSv2":
             return await self.xtts.generate_speech_with_xttsv2_sow_system(
                 text, self.language, self.character_name)
@@ -1760,17 +1806,7 @@ class PipelinedTTSWorker(QThread):
             return await self.kokoro.generate_speech_with_kokoro(
                 text, self.character_name)
         elif method == "ComfyUI":
-            try:
-                out = await self._get_comfy_tts_async().generate(text, self.character_name)
-                if out:
-                    return out
-                logger.warning("[Media] ComfyUI workflow produced no audio, falling back to Kokoro")
-            except Exception as e:
-                if not self._comfy_warned:
-                    logger.warning("[Media] ComfyUI unavailable, falling back to Kokoro: %s", e)
-                    self._comfy_warned = True
-            return await self.kokoro.generate_speech_with_kokoro(
-                text, self.character_name)
+            return await self._get_comfy_tts_async().generate(text, self.character_name)
         elif method == "Silero":
             return await self.silero.generate_speech_with_silero(
                 text, self.character_name)
@@ -1779,10 +1815,11 @@ class PipelinedTTSWorker(QThread):
                 text, self.character_name)
         elif method == "ElevenLabs":
             return await self.eleven.generate_speech_with_elevenlabs_sow_system(
-                text, self.voice_id)
+                self.voice_id)
         else:
             logger.error(f"[PipelinedTTS] unknown TTS method: {method}")
             return None
+
 
     def _persist_segment_for_replay(self, source_file, message_id):
         if not source_file or not os.path.exists(source_file):

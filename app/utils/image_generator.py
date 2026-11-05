@@ -21,6 +21,109 @@ PROVIDER_DALLE       = "DALL-E 3"
 PROVIDER_NOVELAI     = "NovelAI"
 PROVIDER_FLUX        = "FLUX"
 
+#: media.yaml shorthand -> display name used by the dispatcher.
+_IMAGE_PROVIDER_ALIASES = {
+    "comfyui-workflow": PROVIDER_COMFY_WF,
+    "comfyui workflow": PROVIDER_COMFY_WF,
+    "comfyui": PROVIDER_COMFY_WF,
+    "comfy": PROVIDER_COMFY_WF,
+    "a1111": PROVIDER_A1111,
+    "automatic1111": PROVIDER_A1111,
+    "automatic-1111": PROVIDER_A1111,
+    "automatic 1111": PROVIDER_A1111,
+    "comfyui-a1111-api": PROVIDER_COMFYUI,
+    "comfyui a1111 api": PROVIDER_COMFYUI,
+    "novelai": PROVIDER_NOVELAI,
+    "dalle": PROVIDER_DALLE,
+    "dall-e": PROVIDER_DALLE,
+    "dall-e-3": PROVIDER_DALLE,
+    "dall-e 3": PROVIDER_DALLE,
+    "flux": PROVIDER_FLUX,
+}
+
+#: "cloud" expands to these providers, in this fixed internal order.
+_CLOUD_PROVIDERS = [PROVIDER_NOVELAI, PROVIDER_DALLE, PROVIDER_FLUX]
+
+
+def _normalize_provider_names(order) -> list:
+    if isinstance(order, str):
+        order = [order]
+    if not isinstance(order, (list, tuple)):
+        return []
+    out = []
+    for name in order:
+        cleaned = str(name or "").strip().lower()
+        if cleaned and cleaned not in out:
+            out.append(cleaned)
+    return out
+
+
+def image_provider_chain(selected_provider, order) -> list:
+    """Build the image-provider fallback chain for one generation.
+
+    Semantics (Phase-B):
+    - ``order`` (media.yaml ``image_provider_order``) lists providers by
+      priority; unknown names are dropped, duplicates collapse, ``cloud``
+      expands to NovelAI → DALL-E → FLUX;
+    - the GUI/provider setting keeps priority: it is always first when set,
+      the remaining ``order`` entries follow as failure fallbacks;
+    - an empty/missing ``order`` preserves legacy behaviour exactly:
+      only the selected provider runs.
+    """
+    canon: list = []
+    for name in _normalize_provider_names(order):
+        if name == "cloud":
+            for p in _CLOUD_PROVIDERS:
+                if p not in canon:
+                    canon.append(p)
+            continue
+        mapped = _IMAGE_PROVIDER_ALIASES.get(name)
+        if mapped and mapped not in canon:
+            canon.append(mapped)
+
+    sel = str(selected_provider or "").strip()
+    if not canon:
+        return [sel] if sel else []
+
+    chain = [p for p in canon if p != sel]
+    if sel:
+        chain.insert(0, sel)
+    return chain
+
+
+def _read_provider_order():
+    """media.yaml image_provider_order (lazy import to dodge cycles)."""
+    from app.utils import xconfig
+    return xconfig.load("media").get("image_provider_order")
+
+
+async def _try_image_provider(generator_self, provider, prompt, negative, width, height, steps):
+    """Old single-provider dispatch body (unchanged branching)."""
+    if provider == PROVIDER_COMFY_WF:
+        logger.debug("Calling ComfyUI workflow image generation")
+        return await generator_self.generate_comfy_workflow(prompt, negative)
+
+    elif provider == PROVIDER_A1111 or provider == PROVIDER_COMFYUI:
+        logger.debug(f"Calling generate_a1111 with steps={steps}, width={width}, height={height}")
+        return await generator_self.generate_a1111(prompt, negative, width, height, steps)
+
+    elif provider == PROVIDER_DALLE:
+        logger.debug("Calling generate_dalle")
+        return await generator_self.generate_dalle(prompt)
+
+    elif provider == PROVIDER_NOVELAI:
+        logger.debug(f"Calling generate_novelai with steps={steps}, width={width}, height={height}")
+        return await generator_self.generate_novelai(prompt, negative, width, height, steps)
+
+    elif provider == PROVIDER_FLUX:
+        logger.debug(f"Calling generate_flux with width={width}, height={height}")
+        return await generator_self.generate_flux(prompt, width, height)
+
+    else:
+        logger.error("Unsupported image provider: %s", provider)
+        return None
+
+
 class ImageGenerator:
     """
     Manages async image generation across multiple providers.
@@ -55,36 +158,38 @@ class ImageGenerator:
         logger.info("Generating image via %s | prompt: %s", provider, full_prompt)
 
         img_data: Optional[bytes] = None
+        used_provider: Optional[str] = None
 
         try:
-            if provider == PROVIDER_COMFY_WF:
-                logger.debug("Calling ComfyUI workflow image generation")
-                img_data = await self.generate_comfy_workflow(full_prompt, negative)
-                if img_data is None:
-                    logger.warning("[Media] ComfyUI workflow produced no image")
+            # Phase-B: fallback chain from media.yaml:image_provider_order;
+            # the configured provider keeps priority, the list only adds
+            # fallbacks. Empty/missing list -> legacy single-provider path.
+            chain = image_provider_chain(provider, _read_provider_order())
 
-            elif provider == PROVIDER_A1111 or provider == PROVIDER_COMFYUI:
-                logger.debug(f"Calling generate_a1111 with steps={steps}, width={width}, height={height}")
-                img_data = await self.generate_a1111(full_prompt, negative, width, height, steps)
+            for idx, candidate in enumerate(chain):
+                last = idx == len(chain) - 1
+                try:
+                    img_data = await _try_image_provider(
+                        self, candidate, full_prompt, negative, width, height, steps
+                    )
+                except Exception as exc:
+                    if last:
+                        raise
+                    logger.warning("[Media] image provider %r failed (%s), trying next in image_provider_order",
+                                   candidate, exc)
+                    continue
+                if img_data:
+                    used_provider = candidate
+                    break
+                if not last:
+                    if candidate == PROVIDER_COMFY_WF:
+                        logger.warning("[Media] ComfyUI workflow produced no image, trying next provider")
+                    else:
+                        logger.info("[Media] image provider %r returned no image, trying next", candidate)
 
-            elif provider == PROVIDER_DALLE:
-                logger.debug("Calling generate_dalle")
-                img_data = await self.generate_dalle(full_prompt)
-
-            elif provider == PROVIDER_NOVELAI:
-                logger.debug(f"Calling generate_novelai with steps={steps}, width={width}, height={height}")
-                img_data = await self.generate_novelai(full_prompt, negative, width, height, steps)
-
-            elif provider == PROVIDER_FLUX:
-                logger.debug(f"Calling generate_flux with width={width}, height={height}")
-                img_data = await self.generate_flux(full_prompt, width, height)
-
-            else:
-                logger.error("Unsupported image provider: %s", provider)
-                return None
-                
             if img_data:
-                logger.info(f"Successfully received image data from {provider} ({len(img_data)} bytes). Saving...")
+                name = used_provider or provider
+                logger.info(f"Successfully received image data from {name} ({len(img_data)} bytes). Saving...")
             else:
                 logger.warning(f"No image data returned from {provider}.")
 

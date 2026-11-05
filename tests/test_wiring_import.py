@@ -4,8 +4,9 @@ import json
 
 def test_tts_worker_has_comfyui_branch():
     src = open("app/utils/text_to_speech.py", encoding="utf-8").read()
-    assert 'elif self.tts_method == "ComfyUI"' in src, "dispatch branch missing"
+    assert 'method == "ComfyUI"' in src, "dispatch branch missing"
     assert "ComfyUI unavailable, falling back to Kokoro" in src
+    assert "tts_engine_order" in src, "Phase-B order wiring missing"
 
 
 def test_pipelined_path_has_comfyui_branch():

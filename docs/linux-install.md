@@ -55,6 +55,21 @@ EOF
 Дефолты лежат в репо (`config-defaults/`) и сидируются при первом старте;
 правь уже свои копии.
 
+Для локального LLM: непустой `llm.yaml → backend` (любой
+OpenAI-compatible сервер — llama-server, vLLM, Ollama) значит «ходить
+напрямую на этот адрес»; пустой — приложение само запускает
+встроенный llama-server с бинарей из `app/utils/ai_clients/backend/`.
+Подробный сценарий см. `docs/gemma-preset.md`.
+
+На Linux llama.cpp ставьте системно (Arch: `sudo pacman -S llama.cpp`)
+или укажите внешний бэкенд в `llm.yaml`. Встроенный диалог «LLAMA.CPP
+Updater» умеет ставить только Windows-архивы апстрима — на Linux кнопка
+обновления движка показывает «No compatible binary found» и ничего не
+скачивает.
+
+Баннер «доступна новая версия» проверяет релизы этого форка
+(Ganoda/Soul-of-Waifu-Linux), а не апстрима.
+
 ## Медиа через ComfyUI (workflows as config)
 
 Кладёшь экспорт ComfyUI (**Save (API Format)**) в drop-in папку — пресет
@@ -69,6 +84,18 @@ app/data/workflows/video/*.json     # видео (video_enabled: true)
 Маппинг нод — соседний `<name>.meta.yaml` (`text_node_id`, `output_node_id`);
 без него сработает автопоиск по типам нод. Подробности в README внутри папок.
 ComfyUI недоступен ⇒ TTS автоматически падает на встроенный Kokoro.
+
+Порядок бэкендов задаётся в `media.yaml`:
+
+- `tts_engine_order` — цепочка фолбэков TTS (имена: `comfyui`, `kokoro`,
+  `xttsv2`, `edge`, `silero`, `qwen3`, `elevenlabs`). Движок, выбранный
+  в GUI, всегда первый; остальные пункты списка — запасные на случай
+  ошибки или пустого результата. Пустой/отсутствующий список — старое
+  поведение (один выбранный движок; у ComfyUI запас — Kokoro).
+- `image_provider_order` — то же для генерации картинок
+  (`comfyui-workflow`, `a1111`, `novelai`, `dalle`, `flux`;
+  `cloud` = NovelAI → DALL-E → FLUX).
+- `video_enabled` пока никуда не подключён (видео-воркфлоу зарезервировано).
 
 ## Тесты
 
