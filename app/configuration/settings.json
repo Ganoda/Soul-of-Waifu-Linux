@@ -17,7 +17,7 @@
         "llm_backend": 0,
         "gpu_layers": 30,
         "mlock_status": false,
-		"no_mmap_status": false,
+        "no_mmap_status": false,
         "flash_attention_status": false,
         "context_size": 2048,
         "temperature": 0.8,
@@ -34,10 +34,10 @@
         "qwen_model": "",
         "model_background_type": 0,
         "model_background_color": 0,
-        "model_background_image": "assets\\backgrounds",
+        "model_background_image": "assets/backgrounds",
         "chat_background_image": "None",
         "ambient": false,
-        "ambient_sound": "assets\\ambient",
+        "ambient_sound": "assets/ambient",
         "soul_memory": false,
         "auto_summary": false,
         "interval_summary": 5,
@@ -82,7 +82,7 @@
             "sidebar_opacity": 100,
             "sidebar_text": "#E0E0E0"
         },
-        "models_directory": "assets\\local_llm",
+        "models_directory": "assets/local_llm",
         "input_device_real_index": 1,
         "image_gen_enabled": false,
         "image_provider": "Automatic1111",
@@ -115,7 +115,7 @@
         "soul_memory_mode": 0,
         "enable_mcp": false,
         "enable_tool_calling": true,
-		"chat_tools_enabled": false
+        "chat_tools_enabled": false
     },
     "user_data": {
         "default_persona": "None",

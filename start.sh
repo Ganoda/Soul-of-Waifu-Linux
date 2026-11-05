@@ -17,7 +17,7 @@ echo "[1/3] ffmpeg found: $(command -v ffmpeg)"
 
 # [2/3] virtual environment
 if [ ! -f ".venv/bin/python" ]; then
-    echo "ERROR: .venv not found. Run installer.sh first."
+    echo "ERROR: .venv not found. Run ./install.sh first."
     read -r -p "Press Enter to exit..."
     exit 1
 fi

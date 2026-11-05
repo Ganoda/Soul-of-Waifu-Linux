@@ -43,6 +43,22 @@
 
 ---
 
+## 🐧 Linux Install (this fork)
+
+> [!NOTE]
+> **This repository is the Linux/Unix port of Soul of Waifu** (upstream is Windows-focused).
+> On Linux, install and run with two scripts - no installer.bat needed:
+>
+> ```bash
+> ./install.sh    # creates .venv, installs pinned deps (+ Playwright Chromium, fairseq patch)
+> ./start.sh      # launches the app
+> ```
+>
+> Full step-by-step Unix-way guide (uv or plain pip, CUDA vs CPU, config layout in
+> `~/.config/soul-of-waifu/`): **[docs/linux-install.md](docs/linux-install.md)**.
+
+---
+
 ## 🌟 What is Soul of Waifu?
 
 **Soul of Waifu (SoW)** is a free, open-source desktop app where AI characters can remember, evolve, and exist across multiple dimensions of interaction simultaneously. The core idea: a character you create once exists across multiple interconnected modes at the same time - text and voice conversation, a full tabletop RPG engine, a desktop agent with real OS and tool access, and a persistent memory architecture that builds genuine continuity across all your sessions.
@@ -262,6 +278,8 @@ Generate illustrations directly within chat messages via context menu actions.
 ## 📥 Installation
 
 No Python knowledge, Node.js, or command-line experience required.
+
+> On **Linux**, the steps below are Windows-specific - instead run `./install.sh` and then `./start.sh` (see the [Linux Install](#-linux-install-this-fork) section above).
 
 ```
 1. Download the latest release archive (currently Soul-of-Waifu-v2.4.7.rar) from Releases.

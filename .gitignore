@@ -9,5 +9,8 @@ __pycache__/
 .soul_stage*/
 app/cache/
 app/utils/ai_clients/backend/
+backend/_temp/
+app/models/hf_cache/
+app/data/envs/
 .pytest_cache/
 .superpowers/
