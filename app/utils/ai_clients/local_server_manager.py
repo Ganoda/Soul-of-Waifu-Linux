@@ -1,9 +1,11 @@
 import os
 import json
 import logging
+import time
 import asyncio
 import platform
 import subprocess
+import shutil
 import socket
 import shlex
 from pathlib import Path
@@ -15,6 +17,44 @@ from app.configuration import configuration
 from app.utils.ai_clients.llm_config import external_backend
 
 logger = logging.getLogger("Local Server Manager")
+
+# Anchored to this file so the backend directory is found independently of
+# the process working directory (start.sh, IDE, systemd units, ...).
+MODULE_DIR = Path(__file__).resolve().parent
+
+# Root cause of the last failed embedded-server startup, shared with
+# LocalProvider so a subsequent connection error can tell the user WHY the
+# model is offline instead of a bare "Connection error".
+_EMBEDDED_ERROR_TTL_SECONDS = 300
+_error_recorded_at: float | None = None
+_error_message: str | None = None
+
+
+def record_embedded_server_error(message: str) -> None:
+    """Remember why the embedded llama-server failed to come up."""
+    global _error_recorded_at, _error_message
+    _error_recorded_at = time.monotonic()
+    _error_message = message
+
+
+def clear_embedded_server_error() -> None:
+    """Drop the remembered failure once the server is confirmed online."""
+    global _error_recorded_at, _error_message
+    _error_recorded_at = None
+    _error_message = None
+
+
+def recent_embedded_server_error(max_age_seconds: int = _EMBEDDED_ERROR_TTL_SECONDS) -> str | None:
+    """Latest embedded-server failure message, or None if stale/absent.
+
+    Deliberately non-consuming: several requests may hit the same outage
+    and each deserves the explanation.
+    """
+    if _error_message is None or _error_recorded_at is None:
+        return None
+    if time.monotonic() - _error_recorded_at > max_age_seconds:
+        return None
+    return _error_message
 
 class LocalServerManager:
     """
@@ -36,7 +76,7 @@ class LocalServerManager:
 
         self.server_process = None
         self.SERVER_PORT = 48596
-        self.lock_file = Path(f"app/utils/ai_clients/backend/_temp/llama_server_{self.SERVER_PORT}.lock")
+        self.lock_file = MODULE_DIR / "backend" / "_temp" / f"llama_server_{self.SERVER_PORT}.lock"
         
         self.restart_lock = asyncio.Lock()
         self.model_loaded = False
@@ -107,25 +147,64 @@ class LocalServerManager:
         except Exception as e:
             logger.warning(f"Couldn't delete lock file: {e}")
 
+    def _fail_with_message(self, key, fallback):
+        """Translate, record and surface a fatal startup error consistently."""
+        message = self.translations.get(key, fallback)
+        self.update_ui_for_server_state(False)
+        record_embedded_server_error(message)
+        raise RuntimeError(message)
+
     def resolve_server_executable(self, llm_device, llm_backend):
+        """Preferred llama-server path for the selected device/backend profile.
+
+        Path is anchored to this module so it is independent of the process
+        working directory; the ".exe" suffix applies to Windows only.
+        """
         exe_suffix = ".exe" if platform.system() == "Windows" else ""
         current_server = None
 
         match llm_device:
             case 0:
-                current_server = f"app/utils/ai_clients/backend/cpu/llama-server{exe_suffix}"
+                current_server = str(MODULE_DIR / f"backend/cpu/llama-server{exe_suffix}")
             case 1:
                 match llm_backend:
                     case 0:
-                        current_server = f"app/utils/ai_clients/backend/vulkan/llama-server{exe_suffix}"
+                        current_server = str(MODULE_DIR / f"backend/vulkan/llama-server{exe_suffix}")
                     case 1:
-                        current_server = f"app/utils/ai_clients/backend/cuda/llama-server{exe_suffix}"
+                        current_server = str(MODULE_DIR / f"backend/cuda/llama-server{exe_suffix}")
                     case 2:
-                        current_server = f"app/utils/ai_clients/backend/hip/llama-server{exe_suffix}"
+                        current_server = str(MODULE_DIR / f"backend/hip/llama-server{exe_suffix}")
                     case 3:
-                        current_server = f"app/utils/ai_clients/backend/sycl/llama-server{exe_suffix}"
+                        current_server = str(MODULE_DIR / f"backend/sycl/llama-server{exe_suffix}")
 
         return current_server
+
+    def locate_server_binary(self, candidate):
+        """Find an existing llama-server executable for the embedded launch.
+
+        Preference order:
+        1. Bundled per-profile binary (app/utils/ai_clients/backend/<profile>/);
+        2. Distro-provided llama-server on PATH (llama.cpp installed
+           system-wide, e.g. `pacman -S llama.cpp`).
+
+        Device/backend settings keep selecting which flavour is preferred
+        (the profile decides CPU/GPU flags), but any system binary is also
+        usable: the GPU/CPU flags are applied to whatever binary is picked.
+        Returns None when neither exists.
+        """
+        if candidate and Path(candidate).exists():
+            return candidate
+
+        exe_suffix = ".exe" if platform.system() == "Windows" else ""
+        system_server = shutil.which(f"llama-server{exe_suffix}")
+        if system_server:
+            logger.info(
+                f"Bundled server not found at '{candidate}'; "
+                f"falling back to system llama-server from PATH: {system_server}"
+            )
+            return system_server
+
+        return None
 
     async def start_server_async(self):
         logger.info("Starting LLM server process...")
@@ -146,27 +225,35 @@ class LocalServerManager:
 
         if current_server is None:
             logger.error(f"Unsupported llm_device={llm_device} / llm_backend={llm_backend} combination.")
-            self.update_ui_for_server_state(False)
-            raise RuntimeError(self.translations.get(
+            self._fail_with_message(
                 "error_unsupported_backend",
                 "Unsupported device/backend combination selected for the local model."
-            ))
+            )
 
-        if not Path(current_server).exists():
-            logger.error(f"Server executable not found at: {current_server}")
-            self.update_ui_for_server_state(False)
-            raise RuntimeError(self.translations.get(
-                "error_backend_not_found",
-                f"Server executable not found: {current_server}"
-            ))
+        # Bundled per-profile binary first; distro-installed llama.cpp on
+        # PATH is a valid embedded fallback (flags apply the same way).
+        located_server = self.locate_server_binary(current_server)
+        if located_server is None:
+            logger.error(
+                f"Server executable not found at: {current_server} "
+                "(no system llama-server on PATH either)"
+            )
+            self._fail_with_message(
+                "error_llama_server_not_found",
+                "llama-server was not found: no bundled binary in "
+                "app/utils/ai_clients/backend/ and no system-wide llama.cpp on PATH. "
+                "Install llama.cpp (Arch: sudo pacman -S llama.cpp) or point llm.yaml "
+                "'backend:' at an already running OpenAI-compatible server "
+                "(e.g. 'backend: http://127.0.0.1:8080')."
+            )
+        current_server = located_server
 
         if not model_path or not Path(model_path).exists():
             logger.error(f"Model file not found: {model_path}")
-            self.update_ui_for_server_state(False)
-            raise RuntimeError(self.translations.get(
+            self._fail_with_message(
                 "error_model_not_found",
                 f"Model file not found: {model_path}"
-            ))
+            )
 
         gpu_layers = self.configuration_settings.get_main_setting("gpu_layers")
         context_size = self.configuration_settings.get_main_setting("context_size")
@@ -262,11 +349,10 @@ class LocalServerManager:
         except Exception as e:
             logger.error(f"Failed to launch the server process: {e}", exc_info=True)
             self.cleanup_lock_file()
-            self.update_ui_for_server_state(False)
-            raise RuntimeError(self.translations.get(
+            self._fail_with_message(
                 "error_server_launch_failed",
                 f"Failed to launch the local server: {e}"
-            ))
+            )
 
         asyncio.create_task(self.log_stream(self.server_process.stdout, logger.info))
         asyncio.create_task(self.log_stream(self.server_process.stderr, logger.info))
@@ -277,11 +363,10 @@ class LocalServerManager:
             logger.error("Server failed to start.")
             self.server_process = None
             self.cleanup_lock_file()
-            self.update_ui_for_server_state(False)
-            raise RuntimeError(self.translations.get(
+            self._fail_with_message(
                 "error_server_start_failed",
                 "The local server process exited immediately after launch. Check the logs for details."
-            ))
+            )
         else:
             logger.info("Server started successfully.")
 
@@ -353,6 +438,9 @@ class LocalServerManager:
             if hasattr(self.ui, 'update_system_status'):
                 if is_running and self.model_loaded:
                     self.ui.update_system_status("online")
+                    # Online again: a previously recorded startup failure is
+                    # obsolete, do not leak it into future provider hints.
+                    clear_embedded_server_error()
                 else:
                     self.ui.update_system_status("offline")
 
@@ -399,7 +487,33 @@ class LocalServerManager:
         except Exception as e:
             logger.error(f"Error when stopping the server: {e}", exc_info=True)
 
+    def _drain_task_result(self, task):
+        """Retrieve a finished task's result defensively.
+
+        GUI buttons fire ensure_server_running via asyncio.create_task and
+        drop the handle; without draining, failures surface as
+        "Task exception was never retrieved" instead of reaching anyone.
+        The raise sites already log the details, so this only recovers the
+        exception (marks it as handled) and puts the status indicator
+        offline for good measure.
+        """
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            return
+        if exc is not None:
+            logger.info("Server startup task finished with an error (details logged earlier); UI marked offline.")
+            self.update_ui_for_server_state(False)
+
     async def ensure_server_running(self):
+        # Fire-and-forget callers (e.g. app/gui buttons) would otherwise
+        # lose our RuntimeError entirely; draining here covers every path
+        # through ensure_server_running without touching the GUI layer.
+        current_task = asyncio.current_task()
+        if current_task is not None and not getattr(current_task, "_sow_result_drained", False):
+            current_task._sow_result_drained = True
+            current_task.add_done_callback(self._drain_task_result)
+
         async with self.restart_lock:
             # External backend configured in llm.yaml: the app never spawns
             # its own llama-server, the user runs that server themselves.
@@ -428,13 +542,18 @@ class LocalServerManager:
                     if self.server_process and self.server_process.returncode is not None:
                         logger.error(f"Server crashed with code {self.server_process.returncode}")
                         self.cleanup_lock_file()
-                        self.update_ui_for_server_state(False)
-                        raise RuntimeError("Local server crashed. Check logs (Out of memory?)")
-                    
+                        self._fail_with_message(
+                            "error_server_crashed",
+                            "Local server crashed. Check the logs (out of memory?)."
+                        )
+
                     if elapsed > timeout:
                         logger.error("Server loading timed out.")
                         await self.stop_server()
-                        raise RuntimeError("Server loading timed out.")
+                        self._fail_with_message(
+                            "error_server_timeout",
+                            "Server loading timed out."
+                        )
 
     async def shutdown_server_and_model(self):
         logger.info("Shutting down server and model...")

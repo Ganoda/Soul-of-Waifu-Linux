@@ -2295,3 +2295,13 @@ appearance_preview_text_1: "She glances at you,"
 appearance_preview_text_2: "eyes narrowing slowly."
 appearance_preview_text_3: "So... you remember nothing?"
 appearance_preview_text_4: "I remember enough."
+
+# Local llama.cpp server (embedded launcher)
+error_unsupported_backend: "Unsupported device/backend combination selected for the local model."
+error_llama_server_not_found: "llama-server was not found: no bundled binary in app/utils/ai_clients/backend/ and no system-wide llama.cpp on PATH. Install llama.cpp (Arch: sudo pacman -S llama.cpp) or point llm.yaml 'backend:' at an already running OpenAI-compatible server (e.g. 'backend: http://127.0.0.1:8080')."
+error_backend_not_found: "Server executable not found: {path}"
+error_model_not_found: "Model file not found: {path}"
+error_server_launch_failed: "Failed to launch the local server."
+error_server_start_failed: "The local server process exited immediately after launch. Check the logs for details."
+error_server_crashed: "Local server crashed. Check the logs (out of memory?)."
+error_server_timeout: "Server loading timed out."

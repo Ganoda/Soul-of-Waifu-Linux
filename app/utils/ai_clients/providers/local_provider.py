@@ -2,6 +2,7 @@ import logging
 import httpx
 from openai import AsyncOpenAI, APIConnectionError, APITimeoutError
 from app.utils.ai_clients.base_provider import BaseAIProvider
+from app.utils.ai_clients.local_server_manager import recent_embedded_server_error
 
 logger = logging.getLogger("Local Provider")
 
@@ -48,10 +49,16 @@ class LocalProvider(BaseAIProvider):
 
     def _connection_error_message(self, e: Exception) -> str:
         logger.error(f"Local API Connection Error: {e}")
-        return (
+        message = (
             "\n⚠️ Local API Error: Could not reach the local server. "
             "It may still be loading the model, may have crashed, or the port may be blocked."
         )
+        # If the embedded llama-server just failed to start, explain WHY it
+        # is offline instead of leaving the user with a bare connection error.
+        root_cause = recent_embedded_server_error()
+        if root_cause:
+            message += f"\n↳ {root_cause}"
+        return message
 
     def _apply_thinking_budget(self, extra_body: dict, kwargs: dict, payload: dict) -> None:
         reasoning_mode = kwargs.get("reasoning_mode")

@@ -2313,3 +2313,13 @@ appearance_preview_text_1: "Она смотрит на тебя,"
 appearance_preview_text_2: "медленно прищуривая глаза."
 appearance_preview_text_3: "Значит... ты ничего не помнишь?"
 appearance_preview_text_4: "Я помню достаточно."
+
+# Локальный llama.cpp-сервер (встроенный запуск)
+error_unsupported_backend: "Выбрано неподдерживаемое сочетание устройства и backend для локальной модели."
+error_llama_server_not_found: "llama-server не найден: нет бинаря в app/utils/ai_clients/backend/ и нет системного llama.cpp в PATH. Установите llama.cpp (Arch: sudo pacman -S llama.cpp) или укажите уже запущенный OpenAI-совместимый сервер в llm.yaml (например, 'backend: http://127.0.0.1:8080')."
+error_backend_not_found: "Исполняемый файл сервера не найден: {path}"
+error_model_not_found: "Файл модели не найден: {path}"
+error_server_launch_failed: "Не удалось запустить локальный сервер."
+error_server_start_failed: "Локальный сервер завершился сразу после запуска. Подробности в логах."
+error_server_crashed: "Локальный сервер аварийно завершился. Смотрите логи (нехватка памяти?)."
+error_server_timeout: "Превышено время загрузки сервера."
