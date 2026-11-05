@@ -84,6 +84,12 @@ def _is_protected_path(p: Path) -> bool:
         Path.home() / "AppData" / "Local" / "Microsoft",
         Path.home() / "AppData" / "Roaming" / "Microsoft",
     ]
+    if sys.platform != "win32":
+        # POSIX stand-in for the Windows system roots above.
+        protected_roots.extend([
+            Path("/etc"), Path("/usr"), Path("/var"), Path("/boot"), Path("/opt"),
+            Path.home() / ".config",
+        ])
 
     for prot in protected_roots:
         try:

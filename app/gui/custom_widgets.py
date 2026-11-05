@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (QApplication, QLabel, QMessageBox, QPushButton, QWi
 from app.utils.ai_clients.prompt_engine import PromptEngine
 from app.utils.ai_clients.ai_factory import AIFactory
 from app.utils.backend_updater import LlamaUpdater
+from app.utils.platform_utils import open_path
 from app.configuration import configuration
 
 logger = logging.getLogger("Interface Signals")
@@ -3226,7 +3227,7 @@ class SoulMemoryViewer(QtWidgets.QDialog):
         main_layout.addLayout(bottom_layout)
 
         self.btn_refresh.clicked.connect(self.refresh_memory)
-        self.btn_open_folder.clicked.connect(lambda: os.startfile(str(self.memory_dir.absolute())))
+        self.btn_open_folder.clicked.connect(lambda: open_path(str(self.memory_dir.absolute())))
         self.tabs.currentChanged.connect(self.on_tab_changed)
         
         self.topic_list.currentRowChanged.connect(self.load_db_content)

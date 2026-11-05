@@ -70,6 +70,7 @@ from app.gui.custom_widgets import (
 )
 
 from app.utils.translator import Translator
+from app.utils.platform_utils import open_path
 from app.utils.character_cards import CharactersCard, SoulGateway
 from app.utils.text_to_speech import AudioPlaybackWorker
 from app.utils.ambient_client import AmbientPlayer
@@ -12584,7 +12585,7 @@ class InterfaceSignals():
         if not os.path.exists(models_dir):
             os.makedirs(models_dir, exist_ok=True)
         try:
-            os.startfile(models_dir)
+            open_path(models_dir)
         except Exception as e:
             logger.warning(f"[ModelsHub] Cannot open folder: {e}")
 
@@ -15734,12 +15735,7 @@ class InterfaceSignals():
     def _reveal_in_folder(self, path):
         try:
             folder = os.path.dirname(os.path.abspath(path))
-            if os.name == "nt":
-                os.startfile(folder)
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", folder])
-            else:
-                subprocess.Popen(["xdg-open", folder])
+            open_path(folder)
         except Exception as e:
             logger.error(f"Failed to open folder '{path}': {e}")
 

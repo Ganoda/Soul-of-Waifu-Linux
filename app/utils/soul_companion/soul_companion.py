@@ -21,6 +21,8 @@ from typing import Optional, Dict, Any
 from PyQt6 import QtCore
 from PyQt6.QtCore import QTimer
 
+from app.utils.platform_utils import open_path
+
 logger = logging.getLogger("SoulCompanion")
 
 _PRIVACY_KEYWORDS = [
@@ -417,6 +419,25 @@ class MediaControlTool(BaseTool):
                 vk = VK_MEDIA.get(action, 0xB3)
                 ctypes.windll.user32.keybd_event(vk, 0, 0, 0)
                 ctypes.windll.user32.keybd_event(vk, 0, 2, 0)
+            else:
+                # POSIX equivalent: delegate to the MPRIS-aware playerctl utility
+                # when present, otherwise honestly report unavailability.
+                import shutil
+
+                if not shutil.which("playerctl"):
+                    return {
+                        "success": False,
+                        "result": "Media control is unavailable on this system (playerctl is not installed).",
+                        "speak": None
+                    }
+
+                import subprocess
+
+                PLAYERCTL_ACTIONS = {"play": "play", "pause": "pause", "next": "next", "prev": "previous"}
+                subprocess.run(
+                    ["playerctl", PLAYERCTL_ACTIONS.get(action, action)],
+                    capture_output=True, timeout=5
+                )
             return {"success": True, "result": f"Media action '{action}' sent.", "speak": None}
         except Exception as e:
             return {"success": False, "result": str(e), "speak": None}
@@ -1007,9 +1028,20 @@ class ClipboardReaderTool(BaseTool):
         finally:
             user32.CloseClipboard()
 
+    @staticmethod
+    def _read_qt_clipboard() -> str:
+        # POSIX equivalent: reuse the running Qt application clipboard.
+        from PyQt6.QtWidgets import QApplication
+
+        app = QApplication.instance()
+        if app is None:
+            return ""
+        return app.clipboard().text() or ""
+
     async def execute(self, args: dict, context: dict) -> dict:
         try:
-            text = await asyncio.to_thread(self._read_win32_clipboard)
+            reader = self._read_win32_clipboard if sys.platform == "win32" else self._read_qt_clipboard
+            text = await asyncio.to_thread(reader)
             if not text or not text.strip():
                 return {"success": False, "result": "Clipboard is currently empty.", "speak": None}
             return {"success": True, "result": text[:2000].strip(), "speak": None}
@@ -1026,7 +1058,8 @@ _APP_ACTION_MAP = {
 class AppControlTool(BaseTool):
     name = "app_control"
     description = (
-        "Manage Windows applications, folders, and desktop shortcuts. Actions: 'open', 'focus', 'close'. "
+        "Manage applications, folders, and shortcuts. Actions: 'open', 'focus', 'close'. 'focus' is Windows-only; "
+        "'open'/'close' also work on Linux (shortcuts are .desktop launchers). "
         "Can open:\n"
         "1. Folders: 'downloads', 'desktop', 'documents', 'pictures', 'videos', 'recycle bin', or folder paths.\n"
         "2. Desktop & Start Menu shortcuts (.lnk): e.g. 'Cyberpunk', 'Steam', 'Telegram', 'Photoshop', 'VRoidStudio', 'Code'.\n"
@@ -1126,8 +1159,12 @@ class AppControlTool(BaseTool):
         if action not in {"open", "focus", "close"}:
             return {"success": False, "result": f"Unsupported action: '{action}'.", "speak": None}
 
-        if sys.platform != "win32":
-            return {"success": False, "result": "App control is only supported on Windows.", "speak": None}
+        if action == "focus" and sys.platform != "win32":
+            return {
+                "success": False,
+                "result": "Focusing windows is only supported on Windows.",
+                "speak": None
+            }
 
         try:
             if action == "open":
@@ -1151,7 +1188,27 @@ class AppControlTool(BaseTool):
 
     @classmethod
     def _find_shortcut_on_system(cls, target_name: str) -> Optional[Path]:
-        clean_target = target_name.lower().removesuffix(".lnk").removesuffix(".url").strip()
+        clean_target = (target_name.lower()
+                        .removesuffix(".lnk").removesuffix(".url")
+                        .removesuffix(".desktop").strip())
+
+        if sys.platform != "win32":
+            # POSIX equivalent: hunt for matching freedesktop .desktop launchers.
+            search_roots = [
+                Path.home() / ".local" / "share" / "applications",
+                Path("/usr/share/applications"),
+            ]
+            for root in search_roots:
+                if not root.exists():
+                    continue
+                try:
+                    for candidate in root.rglob("*.desktop"):
+                        stem = candidate.stem.lower()
+                        if stem == clean_target or clean_target in stem:
+                            return candidate
+                except Exception:
+                    continue
+            return None
 
         search_dirs = [
             Path.home() / "Desktop",
@@ -1181,9 +1238,28 @@ class AppControlTool(BaseTool):
 
         return None
 
+    @staticmethod
+    def _launch_desktop_entry(desktop_file: Path) -> bool:
+        # On POSIX a .desktop entry is not "opened" directly (that would just
+        # show its source) — launch it via gio/gtk-launch instead.
+        import subprocess
+        import shutil
+
+        for cmd in (["gio", "launch", str(desktop_file)], ["gtk-launch", desktop_file.stem]):
+            exe = shutil.which(cmd[0])
+            if exe:
+                try:
+                    # Detach stdio so launched apps don't hold our streams.
+                    subprocess.Popen([exe, *cmd[1:]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    return True
+                except Exception:
+                    continue
+        return False
+
     @classmethod
     def _open_target(cls, raw_target: str) -> dict:
         import subprocess
+        import shutil
         target_lower = raw_target.lower().strip().strip('"\'')
 
         if target_lower in cls.KNOWN_FOLDER_ALIASES:
@@ -1191,17 +1267,26 @@ class AppControlTool(BaseTool):
             folder_path = folder_resolver()
             try:
                 if isinstance(folder_path, str) and folder_path.startswith("shell:"):
-                    os.startfile(folder_path)
-                else:
-                    os.startfile(str(folder_path))
-                return {"success": True, "result": f"Opened folder '{raw_target}' in Explorer.", "speak": None}
+                    if sys.platform != "win32":
+                        # Rough POSIX stand-in for shell: namespaces (Recycle Bin);
+                        # report unavailability if the Trash folder does not exist.
+                        folder_path = str(Path.home() / ".local" / "share" / "Trash" / "files")
+                        if not Path(folder_path).exists():
+                            return {"success": False, "result": f"Folder '{raw_target}' is not available on this system.", "speak": None}
+                    if not open_path(folder_path):
+                        return {"success": False, "result": f"Could not open folder '{raw_target}': no opener available.", "speak": None}
+                    return {"success": True, "result": f"Opened folder '{raw_target}'.", "speak": None}
+                if not open_path(str(folder_path)):
+                    return {"success": False, "result": f"Could not open folder '{raw_target}': no opener available.", "speak": None}
+                return {"success": True, "result": f"Opened folder '{raw_target}'.", "speak": None}
             except Exception as e:
                 return {"success": False, "result": f"Could not open folder '{raw_target}': {e}", "speak": None}
 
         candidate_path = Path(raw_target).expanduser()
         if candidate_path.exists():
             try:
-                os.startfile(str(candidate_path.resolve()))
+                if not open_path(str(candidate_path.resolve())):
+                    raise RuntimeError("no opener available")
                 item_type = "folder" if candidate_path.is_dir() else "file"
                 return {"success": True, "result": f"Opened {item_type} '{candidate_path.name}'.", "speak": None}
             except Exception as e:
@@ -1210,7 +1295,10 @@ class AppControlTool(BaseTool):
         found_shortcut = cls._find_shortcut_on_system(raw_target)
         if found_shortcut:
             try:
-                os.startfile(str(found_shortcut))
+                if found_shortcut.suffix == ".desktop" and cls._launch_desktop_entry(found_shortcut):
+                    return {"success": True, "result": f"Launched desktop entry '{found_shortcut.stem}'.", "speak": None}
+                if not open_path(str(found_shortcut)):
+                    raise RuntimeError("no opener available")
                 return {"success": True, "result": f"Launched desktop shortcut '{found_shortcut.stem}'.", "speak": None}
             except Exception as e:
                 return {"success": False, "result": f"Could not launch shortcut '{found_shortcut.name}': {e}", "speak": None}
@@ -1219,13 +1307,26 @@ class AppControlTool(BaseTool):
 
         if ":" in resolved_app and not resolved_app.startswith(("http://", "https://", "file://")) and not Path(resolved_app).is_absolute():
             try:
-                os.startfile(resolved_app)
+                if not open_path(resolved_app):
+                    raise RuntimeError("no opener available")
                 return {"success": True, "result": f"Launched '{raw_target}' via protocol handler.", "speak": None}
             except Exception as ex:
                 return {"success": False, "result": f"Could not launch protocol '{resolved_app}': {ex}", "speak": None}
 
+        if sys.platform != "win32":
+            # POSIX: the Windows .exe aliases are meaningless here — probe PATH
+            # for a matching binary before reporting an honest failure.
+            unix_name = resolved_app[:-4] if resolved_app.lower().endswith(".exe") else resolved_app
+            binary = shutil.which(unix_name) or shutil.which(target_lower)
+            if binary:
+                # Detach stdio so launched apps don't hold our streams.
+                subprocess.Popen([binary], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return {"success": True, "result": f"Application '{raw_target}' launched successfully.", "speak": None}
+            return {"success": False, "result": f"Application '{raw_target}' not found on this system.", "speak": None}
+
         try:
-            os.startfile(resolved_app)
+            if not open_path(resolved_app):
+                raise RuntimeError("no opener available")
             return {"success": True, "result": f"Application '{raw_target}' launched successfully.", "speak": None}
         except Exception:
             pass
@@ -1239,7 +1340,7 @@ class AppControlTool(BaseTool):
                     with winreg.OpenKey(root_key, reg_path) as k:
                         app_full_path, _ = winreg.QueryValueEx(k, "")
                         if app_full_path and os.path.exists(app_full_path.strip('"')):
-                            os.startfile(app_full_path.strip('"'))
+                            open_path(app_full_path.strip('"'))
                             return {"success": True, "result": f"Application '{raw_target}' launched from App Paths.", "speak": None}
                 except FileNotFoundError:
                     continue

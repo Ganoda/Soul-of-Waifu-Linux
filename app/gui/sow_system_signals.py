@@ -63,6 +63,12 @@ if sys.platform == "win32":
         if ctypes.windll.user32.GetLastInputInfo(ctypes.byref(lii)):
             return ctypes.windll.kernel32.GetTickCount64() - lii.dwTime
         return 0
+else:
+    def _get_system_idle_time_ms() -> int:
+        # No cross-platform idle source among the project dependencies
+        # (no python-xlib/pyautogui) — report "always active" so the
+        # sleep manager simply never puts the companion to sleep.
+        return 0
 
 logger = logging.getLogger("SOW System Interface Signals")
 
