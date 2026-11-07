@@ -14,3 +14,8 @@ app/models/hf_cache/
 app/data/envs/
 .pytest_cache/
 .superpowers/
+
+# user-local VRM avatars and app runtime state
+*.vrm
+.soul/
+app/data/.soul/

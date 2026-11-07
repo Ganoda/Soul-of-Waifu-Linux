@@ -29,8 +29,14 @@ export VIRTUAL_ENV="$PWD/.venv"
 # (SOW_CONFIG_DIR > XDG_CONFIG_HOME > ~/.config/soul-of-waifu);
 # здесь ничего не форсируем, чтобы не перекрывать XDG_CONFIG_HOME.
 export HF_HOME="$PWD/app/models/hf_cache"
-# QtWebEngine needs no-sandbox without privileged helper user namespaces config:
-export QTWEBENGINE_CHROMIUM_FLAGS="${QTWEBENGINE_CHROMIUM_FLAGS:---no-sandbox}"
+# QtWebEngine needs no-sandbox without privileged helper user namespaces config.
+# NVIDIA + XWayland: Chromium reports "GBM is not supported ... Fallback to Vulkan
+# rendering" and the ANGLE-Vulkan GPU process crashes, taking the whole app down
+# when the VRM viewer initializes WebGL. Steer ANGLE to desktop GL and disable
+# the GPU sandbox / compositing paths (user-provided flags are preserved).
+export QTWEBENGINE_CHROMIUM_FLAGS="${QTWEBENGINE_CHROMIUM_FLAGS:---no-sandbox} --disable-gpu-sandbox --disable-gpu-compositing --use-angle=gl"
+# If VRM still crashes on your GPU, force software rendering instead:
+#   export QTWEBENGINE_CHROMIUM_FLAGS="$QTWEBENGINE_CHROMIUM_FLAGS --disable-gpu"
 # Prefer X11 backend via XWayland for Live2D/OpenGL stability on NVIDIA:
 if [ -z "$QT_QPA_PLATFORM" ] && [ -n "$WAYLAND_DISPLAY" ]; then
     export QT_QPA_PLATFORM=xcb

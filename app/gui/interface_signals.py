@@ -13762,33 +13762,41 @@ class InterfaceSignals():
                     safe_path = model_rel_path.replace("\\", "/")
                     html_url += f"?model=/{safe_path}"
                 
+                def _vrm_js(js, callback=0):
+                    """Run JS on the VRM page; silently skip if the view was deleted."""
+                    try:
+                        self.vrm_webview.page().runJavaScript(js, callback)
+                    except RuntimeError:
+                        # QWebEngineView C++ object already deleted (chat/mode switched).
+                        return
+
                 def set_background_vrm(bg_type, color=None, image=None):
                     if bg_type == 0:
                         match color:
-                            case 0: self.vrm_webview.page().runJavaScript(f"setBackground('color', 0x000000)")
-                            case 1: self.vrm_webview.page().runJavaScript(f"setBackground('color', 0x1A202F)")
-                            case 2: self.vrm_webview.page().runJavaScript(f"setBackground('color', 0x2C1A22)")
-                            case 3: self.vrm_webview.page().runJavaScript(f"setBackground('color', 0x222B24)")
-                            case 4: self.vrm_webview.page().runJavaScript(f"setBackground('color', 0x2E2232)")
-                            case 5: self.vrm_webview.page().runJavaScript(f"setBackground('color', 0x292929)")
+                            case 0: _vrm_js(f"setBackground('color', 0x000000)")
+                            case 1: _vrm_js(f"setBackground('color', 0x1A202F)")
+                            case 2: _vrm_js(f"setBackground('color', 0x2C1A22)")
+                            case 3: _vrm_js(f"setBackground('color', 0x222B24)")
+                            case 4: _vrm_js(f"setBackground('color', 0x2E2232)")
+                            case 5: _vrm_js(f"setBackground('color', 0x292929)")
                     elif bg_type == 1:
                         safe_path = image.replace("\\", "/")
                         imageUrl = f"/{safe_path}"
-                        self.vrm_webview.page().runJavaScript(f"setBackground('image', null, '{imageUrl}')")
+                        _vrm_js(f"setBackground('image', null, '{imageUrl}')")
 
                 def set_expression_vrm(emotion):
                     if emotion in ['anger', 'disapproval', 'annoyance', 'disgust']:
-                        self.vrm_webview.page().runJavaScript(f"setExpression('angry')")
+                        _vrm_js(f"setExpression('angry')")
                     elif emotion in ['admiration', 'amusement', 'approval', 'desire', 'gratitude', 'love', 'optimism', 'pride', 'joy']:
-                        self.vrm_webview.page().runJavaScript(f"setExpression('happy')")
+                        _vrm_js(f"setExpression('happy')")
                     elif emotion == 'neutral':
-                        self.vrm_webview.page().runJavaScript(f"setExpression('neutral')")
+                        _vrm_js(f"setExpression('neutral')")
                     elif emotion in ['caring', 'relief']:
-                        self.vrm_webview.page().runJavaScript(f"setExpression('relaxed')")
+                        _vrm_js(f"setExpression('relaxed')")
                     elif emotion in ['disappointment', 'grief', 'remorse', 'sadness']:
-                        self.vrm_webview.page().runJavaScript(f"setExpression('sad')")
+                        _vrm_js(f"setExpression('sad')")
                     elif emotion in ['confusion', 'curiosity', 'embarrassment', 'fear', 'nervousness', 'realization', 'surprise']:
-                        self.vrm_webview.page().runJavaScript(f"setExpression('surprised')")
+                        _vrm_js(f"setExpression('surprised')")
 
                 def play_vrm_animation(emotion):
                     animation_map = {
@@ -13803,7 +13811,7 @@ class InterfaceSignals():
                     }
                     anim_file = animation_map.get(emotion, "neutral.fbx")
                     animation_url = f"/app/utils/emotions/vrm/expressions/{anim_file}"
-                    self.vrm_webview.page().runJavaScript(f"loadFBX('{animation_url}')")
+                    _vrm_js(f"loadFBX('{animation_url}')")
 
                 self.set_background_vrm = set_background_vrm
                 self.set_expression_vrm = set_expression_vrm
@@ -13813,7 +13821,7 @@ class InterfaceSignals():
 
                 def on_load_finished(ok):
                     if ok:
-                        self.vrm_webview.page().runJavaScript("window.vrmLoaded", lambda is_loaded: on_vrm_loaded(is_loaded))
+                        _vrm_js("window.vrmLoaded", lambda is_loaded: on_vrm_loaded(is_loaded))
                     else:
                         logger.error("Error loading page")
 
@@ -13823,7 +13831,7 @@ class InterfaceSignals():
                         QtCore.QTimer.singleShot(500, lambda: set_expression_vrm(current_emotion))
                         QtCore.QTimer.singleShot(500, lambda: play_vrm_animation(current_emotion))
                     else:
-                        QtCore.QTimer.singleShot(1000, lambda: self.vrm_webview.page().runJavaScript("window.vrmLoaded", lambda is_loaded: on_vrm_loaded(is_loaded)))
+                        QtCore.QTimer.singleShot(1000, lambda: _vrm_js("window.vrmLoaded", lambda is_loaded: on_vrm_loaded(is_loaded)))
 
                 self.vrm_webview.page().loadFinished.connect(on_load_finished)
 

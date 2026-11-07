@@ -1,0 +1,13 @@
+<!--
+  Minimal Qt resource bundle for the Linux port.
+  Recreates the upstream ":/sowInterface/" prefix entries that are
+  actually referenced by the GUI QSS (checked.png, arrowDown.png).
+  Compile:  rcc sowInterface.qrc -o sowInterface.rcc
+  Registered at import time by app/gui/icons/resources.py.
+-->
+<RCC>
+  <qresource prefix="sowInterface">
+    <file alias="arrowDown.png">arrow_down.png</file>
+    <file>checked.png</file>
+  </qresource>
+</RCC>

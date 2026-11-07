@@ -20,7 +20,9 @@ fi
 source .venv/bin/activate
 export VIRTUAL_ENV="$PWD/.venv"
 export HF_HOME="$PWD/app/models/hf_cache"
-export QTWEBENGINE_CHROMIUM_FLAGS="${QTWEBENGINE_CHROMIUM_FLAGS:---no-sandbox}"
+# Same rationale as start.sh: NVIDIA + XWayland needs ANGLE/GL instead of the
+# crash-prone Vulkan GPU path, plus GPU sandbox/compositing disabled.
+export QTWEBENGINE_CHROMIUM_FLAGS="${QTWEBENGINE_CHROMIUM_FLAGS:---no-sandbox} --disable-gpu-sandbox --disable-gpu-compositing --use-angle=gl"
 if [ -z "${QT_QPA_PLATFORM:-}" ] && [ -n "${WAYLAND_DISPLAY:-}" ]; then
     export QT_QPA_PLATFORM=xcb
 fi
