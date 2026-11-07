@@ -1,5 +1,12 @@
 # Интерфейс: тема, Wayland, горячие клавиши
 theme: system                # system|dark|light (pass-through, Phase-B hook)
+reply_language: auto         # auto|ru|en|uk|de|fr|es|it|pt|pl|cs|tr|ja|ko|zh|ar|hi|none
+                             # auto = отвечать тем же языком, на котором пишет юзер;
+                             # код (ru, en, ...) = всегда отвечать на этом языке;
+                             # none = не добавлять языковую инструкцию в промпт.
+                             # Consumed by app/utils/ai_clients/prompt_engine.py
+                             # (system-prompt directive). NOTE: existing ui.yaml files
+                             # are not re-seeded — add this key manually to an old config.
 wayland:
   qt_platform: xcb           # xcb|wayland|"auto" — consumed by start.sh/main.py
 hotkeys:

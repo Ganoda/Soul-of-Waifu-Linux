@@ -56,6 +56,8 @@
 >
 > Full step-by-step Unix-way guide (uv or plain pip, CUDA vs CPU, config layout in
 > `~/.config/soul-of-waifu/`): **[docs/linux-install.md](docs/linux-install.md)**.
+> Text-to-speech setup (engines, offline vs online, `tts_engine_order`, ComfyUI-TTS):
+> **[docs/tts-setup.md](docs/tts-setup.md)** (in Russian).
 
 ---
 

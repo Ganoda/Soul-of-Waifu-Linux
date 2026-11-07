@@ -56,6 +56,8 @@
 >
 > Полное пошаговое руководство в стиле Unix (uv или обычный pip, CUDA против CPU,
 > расположение конфигов в `~/.config/soul-of-waifu/`): **[docs/linux-install.md](docs/linux-install.md)**.
+> Настройка озвучки (TTS): движки, что локально/что онлайн, `tts_engine_order`,
+> ComfyUI-TTS: **[docs/tts-setup.md](docs/tts-setup.md)**.
 
 ---
 

@@ -10,9 +10,70 @@ import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 
 from app.configuration import configuration
+from app.utils import xconfig
 from app.utils.embedding_provider import get_embedder
 
 logger = logging.getLogger("Prompt Engine")
+
+# ISO-ish language code -> English name used inside the system-prompt directive.
+_LANGUAGE_NAMES = {
+    "ru": "Russian",
+    "en": "English",
+    "uk": "Ukrainian",
+    "be": "Belarusian",
+    "kk": "Kazakh",
+    "de": "German",
+    "fr": "French",
+    "es": "Spanish",
+    "it": "Italian",
+    "pt": "Portuguese",
+    "pl": "Polish",
+    "cs": "Czech",
+    "tr": "Turkish",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "zh": "Chinese",
+    "ar": "Arabic",
+    "hi": "Hindi",
+}
+
+# Values that explicitly disable the language directive.
+_LANGUAGE_OFF_VALUES = ("none", "off", "disabled", "false")
+
+# "auto": mirror whatever language the user writes in (default; fixes the
+# "character answers in English when I write in Russian" complaint).
+_AUTO_LANGUAGE_DIRECTIVE = (
+    "Always respond in the same language the user writes in. "
+    "If the user writes in Russian, respond in Russian; if in English, "
+    "respond in English, and so on for any language. "
+    "Never switch to another language unless the user explicitly asks you to."
+)
+
+
+def get_language_directive(reply_language) -> str | None:
+    """Map ui.yaml ``reply_language`` to a system-prompt directive line.
+
+    Semantics:
+      - missing / None / "" / off-values  -> None (no directive injected)
+      - "auto"                            -> mirror the user's language
+      - ISO code or name (ru, en, de...)  -> always respond in that language
+    Unknown non-empty codes are passed through verbatim as the language name.
+    """
+    if reply_language is None:
+        return None
+    lang = str(reply_language).strip()
+    if not lang:
+        return None
+    low = lang.lower()
+    if low in _LANGUAGE_OFF_VALUES:
+        return None
+    if low == "auto":
+        return _AUTO_LANGUAGE_DIRECTIVE
+    name = _LANGUAGE_NAMES.get(low, lang)
+    return (
+        f"Always respond in {name}. "
+        "Never respond in any other language unless the user explicitly asks you to."
+    )
 
 ai_clients_dir = Path(__file__).resolve().parent
 tiktoken_file = ai_clients_dir / "9b5ad71b2ce5302211f9c61530b329a4922fc6a4"
@@ -597,9 +658,21 @@ class PromptEngine:
         if state_prompt_block:
             for key, value in replacements.items():
                 state_prompt_block = state_prompt_block.replace(key, str(value))
-            
+
             system_blocks.append({"role": "system", "content": state_prompt_block})
             current_token_count += self.count_tokens(state_prompt_block)
+
+        # Reply-language directive (config ui.yaml `reply_language`).
+        # Missing key -> no directive, preserving legacy prompts verbatim.
+        try:
+            reply_language = xconfig.load("ui").get("reply_language")
+            language_directive = get_language_directive(reply_language)
+        except Exception as e:
+            logger.warning(f"[Prompt Engine] Failed to resolve reply_language: {e}")
+            language_directive = None
+        if language_directive:
+            system_blocks.append({"role": "system", "content": language_directive})
+            current_token_count += self.count_tokens(language_directive)
 
         final_user_message = user_message
         if activated_entries["scenario"]:
