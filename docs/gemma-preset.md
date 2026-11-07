@@ -47,6 +47,23 @@ model: gemma4-abliterated        # имя, под которым сервер о
 даёт понятную ошибку с этими же двумя вариантами решения вместо
 «Local API Connection Error».
 
+**Мультимодальность (картинки в чат).** llama.cpp включает vision только
+через отдельный projector-файл. Встроенному запуску приложение находит
+его само: соседний `*.gguf` с `mmproj`/`projector` в имени и совпадающим
+префиксом модели — пара `Huihui-gemma-4-12B-it-abliterated-GGUF.gguf` +
+`Huihui-gemma-4-12B-it-abliterated-projector.gguf` подхватывается без
+настроек (флаг `--mmproj`, в логе — строка «Multimodal projector: …»).
+Проектор чужого семейства (например, `mmproj-Swift-Qwen3.8-Flash-Next-BF16.gguf`
+рядом с Gemma) намеренно игнорируется. Если автопоиск промахнулся, укажи
+путь вручную в `~/.config/soul-of-waifu/llm.yaml`:
+
+```yaml
+mmproj_path: /путь/к/Huihui-gemma-4-12B-it-abliterated-projector.gguf
+```
+
+Пусто (по умолчанию) ⇒ авто-детект. При ручном запуске `llama-server` из
+шага 2 добавь `--mmproj <путь-к-projector.gguf>` в команду сам.
+
 `ctx` — параметр самого сервера (смотри команду выше или флаг
 `--ctx-size` встроенного запуска), остальные сэмплеры читаются из
 llm.yaml и уходят в каждый запрос. Явные настройки сэмплинга в GUI

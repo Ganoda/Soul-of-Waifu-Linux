@@ -1,6 +1,7 @@
 # Параметры локальной нейросети и STT
 backend: ""                         # OpenAI-compat адрес (llama-server / vLLM / Ollama), напр. http://127.0.0.1:8080; пусто ⇒ встроенный llama-server
 api_key: ""                          # "ollama" style dummy accepted
+mmproj_path: ""                      # GGUF-проектор для vision (--mmproj); пусто ⇒ авто-детект соседнего *mmproj*/*projector*.gguf рядом с моделью
 model: gemma4-abliterated            # served model name
 ctx: 16384
 temperature: 0.85

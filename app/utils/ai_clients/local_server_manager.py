@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import re
 import time
 import asyncio
 import platform
@@ -55,6 +56,116 @@ def recent_embedded_server_error(max_age_seconds: int = _EMBEDDED_ERROR_TTL_SECO
     if time.monotonic() - _error_recorded_at > max_age_seconds:
         return None
     return _error_message
+
+
+# --- Multimodal projector (mmproj) discovery -------------------------------
+# llama.cpp only enables vision when llama-server is given an explicit
+# "--mmproj <file>". Model repos ship that projector as a second GGUF next
+# to the text model, with the model name embedded in the file name:
+#   Huihui-gemma-4-12B-it-abliterated-GGUF.gguf
+#   Huihui-gemma-4-12B-it-abliterated-projector.gguf     (suffix style)
+#   mmproj-Swift-Qwen3.8-Flash-Next-BF16.gguf            (llama.cpp prefix style)
+
+_PROJECTOR_MARKERS = ("mmproj", "projector")
+_NAME_TOKEN_SPLIT = re.compile(r"[-_. ]+")
+
+
+def _name_tokens(stem: str) -> list[str]:
+    """Lowercased name chunks for family matching.
+
+    'Huihui-gemma-4-12B-it' -> ['huihui', 'gemma', '4', '12b', 'it']
+    """
+    return [t for t in _NAME_TOKEN_SPLIT.split(stem.lower()) if t]
+
+
+def _looks_like_projector(file_name: str) -> bool:
+    lowered = file_name.lower()
+    return any(marker in lowered for marker in _PROJECTOR_MARKERS)
+
+
+def _common_token_prefix_len(left: list[str], right: list[str]) -> int:
+    length = 0
+    for a, b in zip(left, right):
+        if a != b:
+            break
+        length += 1
+    return length
+
+
+def _family_match_score(model_tokens: list[str], candidate_tokens: list[str]) -> tuple[int, int]:
+    """(token-prefix length, shared-token count) for a projector-looking file.
+
+    Two signals, strongest first:
+    - a direct token prefix ("Huihui-...-projector" next to
+      "Huihui-...-GGUF");
+    - shared tokens ignoring order (>= 2 to count), so
+      "mmproj-<Model>-<BF16>.gguf" pairs with "<Model>-<Q4_K_M>.gguf" even
+      when the projector name carries extra leading tags ("Swift") or
+      trailing quant tags.
+
+    A single shared token (usually generic: "it", "f16", "gguf") never
+    matches on its own - that is what keeps a foreign family's projector
+    from being grabbed when several models share one directory.
+    """
+    prefix = _common_token_prefix_len(model_tokens, candidate_tokens)
+    shared = len(set(model_tokens) & set(candidate_tokens))
+    return prefix, shared
+
+
+def find_mmproj_sibling(model_path) -> str | None:
+    """Auto-detect a multimodal projector GGUF next to the model file.
+
+    Scans the model's directory for *.gguf files that look like projectors
+    ("mmproj"/"projector" in the name) and belong to the model's family by
+    name. Returns the sibling path, or None to keep a text-only launch.
+
+    A projector-looking file from a DIFFERENT family (e.g. a Qwen mmproj
+    lying next to a Gemma model) is deliberately ignored - attaching it
+    would break or corrupt the launch - and reported once, so the user
+    learns why vision did not turn on and can set mmproj_path in llm.yaml.
+    """
+    model = Path(model_path).expanduser()
+    directory = model.parent
+    if not directory.is_dir():
+        return None
+
+    model_tokens = _name_tokens(model.stem)
+    best: tuple[tuple[int, int], Path] | None = None
+    skipped: list[str] = []
+
+    for entry in sorted(directory.iterdir()):
+        if not entry.is_file() or entry.suffix.lower() != ".gguf":
+            continue
+        if entry.name == model.name:
+            continue
+        if not _looks_like_projector(entry.name):
+            continue
+
+        candidate_tokens = _name_tokens(entry.stem)
+        # "mmproj-<Model>-<quant>.gguf" leads with the marker token; drop it
+        # so family matching compares against the model-name part.
+        while candidate_tokens and candidate_tokens[0] in ("mmproj", "mm", "proj", "projector"):
+            candidate_tokens = candidate_tokens[1:]
+
+        score = _family_match_score(model_tokens, candidate_tokens)
+        prefix, shared = score
+        if prefix <= 0 and shared < 2:
+            skipped.append(entry.name)
+            continue
+        if best is None or score > best[0]:
+            best = (score, entry)
+
+    if best is not None:
+        return str(best[1])
+
+    if skipped:
+        logger.warning(
+            f"Projector-like GGUF found next to '{model.name}' but ignored "
+            f"(different model family): {', '.join(sorted(skipped))}. "
+            "Set 'mmproj_path' in llm.yaml to force one."
+        )
+    return None
+
 
 class LocalServerManager:
     """
@@ -206,6 +317,52 @@ class LocalServerManager:
 
         return None
 
+    def resolve_mmproj_path(self, model_path):
+        """Pick a multimodal projector (mmproj) for the selected model, if any.
+
+        Priority:
+        1. Explicit `mmproj_path:` override from llm.yaml (empty by default).
+           A non-existent override warns and falls through to auto-detection,
+           so a typo cannot block the launch.
+        2. Auto-detected sibling projector GGUF in the model's directory
+           (see find_mmproj_sibling).
+
+        Returns None - meaning a text-only launch, exactly as before mmproj
+        support existed - when neither yields an existing file. Best-effort
+        by design: a detection failure must never prevent the server start.
+        """
+        if not model_path:
+            return None
+
+        from app.utils import xconfig
+
+        try:
+            override = (xconfig.load("llm").get("mmproj_path") or "").strip()
+        except Exception as e:
+            logger.debug(f"Could not read llm.yaml mmproj_path ({e}); auto-detection only.")
+            override = ""
+
+        if override:
+            expanded = os.path.expanduser(override)
+            if os.path.exists(expanded):
+                logger.info(f"Multimodal projector override from llm.yaml: {expanded}")
+                return expanded
+            logger.warning(
+                f"mmproj_path from llm.yaml does not exist: '{override}'; "
+                "falling back to auto-detection."
+            )
+
+        try:
+            sibling = find_mmproj_sibling(model_path)
+        except Exception as e:
+            logger.warning(f"mmproj auto-detection failed ({e}); continuing text-only.")
+            return None
+        if sibling:
+            logger.info(f"Auto-detected multimodal projector next to the model: {sibling}")
+            return sibling
+
+        return None
+
     async def start_server_async(self):
         logger.info("Starting LLM server process...")
         await asyncio.sleep(1)
@@ -273,6 +430,14 @@ class LocalServerManager:
             "--port", str(self.SERVER_PORT),
             "--parallel", "1",
         ]
+
+        # Vision: attach a multimodal projector when one can be resolved for
+        # this model (llm.yaml override or sibling auto-detection). Appended
+        # before custom_args, so a manual "--mmproj" there still wins.
+        mmproj_path = self.resolve_mmproj_path(model_path)
+        if mmproj_path:
+            command.extend(["--mmproj", mmproj_path])
+            logger.info(f"Multimodal projector: {mmproj_path}")
 
         if reasoning_mode is False:
             command.extend(["--reasoning-budget", "0", "--reasoning", "off"])
