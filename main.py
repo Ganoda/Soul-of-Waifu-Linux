@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import QApplication, QMainWindow, QMessageBox
 from app.configuration import configuration
 from app.gui.icons import resources
 from app.gui import interface_signals
-from app.utils.ai_clients.local_server_manager import LocalServerManager
+from app.utils.ai_clients.local_server_manager import get_shared_server_manager
 from app.gui.sowInterface import Ui_MainWindow
 
 from app.gui.custom_widgets import SowConfirmDialog
@@ -97,6 +97,15 @@ class _EdgeResizeGrip(QtWidgets.QWidget):
         super().mousePressEvent(event)
 
 
+# File types accepted as chat message attachments via drag & drop — mirrors
+# the filter of the "attach files" dialog in interface_signals.
+CHAT_ATTACH_EXTS = (
+    '.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif',
+    '.txt', '.md', '.markdown', '.json', '.csv', '.log', '.yaml', '.yml', '.xml',
+    '.py', '.js', '.ts', '.html', '.css', '.pdf', '.docx',
+)
+
+
 class MainWindow(QMainWindow):
     """
     Main application window for 'Soul of Waifu'.
@@ -104,6 +113,9 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super(MainWindow, self).__init__()
         self.setAcceptDrops(True)
+        # Whether an in-progress drop attaches files to the chat message
+        # (chat page) or imports a character card (everywhere else).
+        self._drop_mode = "card"
 
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
@@ -131,7 +143,7 @@ class MainWindow(QMainWindow):
                 self.apply_translations()
 
         self.interface_signals = interface_signals.InterfaceSignals(self.ui, self)
-        self.local_server_manager = LocalServerManager(self.ui)
+        self.local_server_manager = get_shared_server_manager(ui=self.ui)
 
         self.create_size_grips()
         QtCore.QTimer.singleShot(0, self.update_size_grip_positions)
@@ -185,13 +197,36 @@ class MainWindow(QMainWindow):
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
-            for url in event.mimeData().urls():
-                if url.isLocalFile() and url.toLocalFile().lower().endswith(('.png', '.json')):
-                    self.drop_overlay.resize(self.size())
-                    self.drop_overlay.show()
-                    self.drop_overlay.raise_()
-                    event.acceptProposedAction()
-                    return
+            exts = [
+                os.path.splitext(url.toLocalFile())[1].lower()
+                for url in event.mimeData().urls() if url.isLocalFile()
+            ]
+            on_chat_page = (
+                hasattr(self, "ui")
+                and self.ui.stackedWidget.currentWidget() is self.ui.chat_page
+            )
+            if on_chat_page and any(e in CHAT_ATTACH_EXTS for e in exts):
+                self._drop_mode = "attach"
+                self.drop_overlay.setText(self.translations.get(
+                    "drag_and_drop_attach_overlay",
+                    "Release to attach the files to your message"
+                ))
+            elif any(e in ('.png', '.json') for e in exts):
+                self._drop_mode = "card"
+                self.drop_overlay.setText(self.translations.get(
+                    "drag_and_drop_overlay",
+                    "Drag and drop a .png or .json card directly here\n"
+                    "to import it into Soul of Waifu"
+                ))
+            else:
+                event.ignore()
+                return
+
+            self.drop_overlay.resize(self.size())
+            self.drop_overlay.show()
+            self.drop_overlay.raise_()
+            event.acceptProposedAction()
+            return
         event.ignore()
 
     def dragLeaveEvent(self, event):
@@ -202,11 +237,26 @@ class MainWindow(QMainWindow):
         self.drop_overlay.hide()
         if not event.mimeData().hasUrls():
             return
-            
+
+        if getattr(self, '_drop_mode', 'card') == "attach" and hasattr(self, 'interface_signals'):
+            signals = self.interface_signals
+            added = 0
+            for url in event.mimeData().urls():
+                if not url.isLocalFile():
+                    continue
+                if len(signals.pending_attachments) >= signals.MAX_ATTACHMENTS_PER_MESSAGE:
+                    break
+                signals._add_pending_attachment(url.toLocalFile())
+                added += 1
+            if added:
+                signals._refresh_attachment_preview_bar()
+                event.acceptProposedAction()
+            return
+
         for url in event.mimeData().urls():
             if url.isLocalFile() and url.toLocalFile().lower().endswith(('.png', '.json')):
                 file_path = url.toLocalFile()
-                
+
                 if hasattr(self, 'interface_signals'):
                     self.interface_signals.populate_editor_character_list()
                     self.interface_signals.prepare_new_character_editor()
@@ -904,7 +954,24 @@ if __name__ == "__main__":
     fonts_folder = "app/font"
     main_window.load_fonts_from_folder(fonts_folder)
 
-    main_window.show()    
+    main_window.show()
+
+    # Останавливаем встроенный llama-server при выходе из приложения: сервер,
+    # который подняло само приложение, не должен переживать его закрытие.
+    # Серверы, к которым приложение только подключилось (внешний llm.yaml
+    # backend или уже запущенный процесс), не трогаем.
+    def _shutdown_embedded_server():
+        try:
+            manager = getattr(main_window, "local_server_manager", None)
+            proc = getattr(manager, "server_process", None) if manager else None
+            if proc is not None and proc.returncode is None:
+                proc.terminate()
+            if manager is not None:
+                manager.cleanup_lock_file()
+        except Exception as e:
+            logging.getLogger("Config").warning(f"[Exit] embedded server shutdown skipped: {e}")
+
+    app.aboutToQuit.connect(_shutdown_embedded_server)
 
     current_version = APP_VERSION
 

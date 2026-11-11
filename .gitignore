@@ -19,3 +19,6 @@ app/data/envs/
 *.vrm
 .soul/
 app/data/.soul/
+
+# Generated TTS output (per-sentence wavs)
+app/voices/qwen_audio/

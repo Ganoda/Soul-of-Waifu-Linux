@@ -45,7 +45,10 @@ from PyQt6.QtWidgets import (
 )
 
 from app.gui.character_ai_assistant import CharacterAIAssistantDialog
-from app.utils.ai_clients.local_server_manager import LocalServerManager
+from app.utils.ai_clients.local_server_manager import (
+    LocalServerManager,
+    get_shared_server_manager,
+)
 from app.utils.ai_clients.prompt_engine import (
     PromptEngine, strip_partial_state_tag, extract_state_update,
     strip_partial_reasoning_tag, extract_reasoning, find_reasoning_open, find_reasoning_close
@@ -245,7 +248,7 @@ class InterfaceSignals():
 
         # --- AI Client Initialization ---
         self.prompt_engine = PromptEngine()
-        self.local_server_manager = LocalServerManager(self.ui)
+        self.local_server_manager = get_shared_server_manager(ui=self.ui)
 
         # --- Soul Stage ---
         _ss_npc_registry = None
@@ -1091,25 +1094,17 @@ class InterfaceSignals():
             pass
 
     async def run_tool_loop(self, provider, messages, character_name, user_name):
+        """Legacy two-pass tool handling for providers without streaming tools.
+
+        Kept for non-local providers; the embedded llama-server path uses
+        _stream_with_tool_loop instead (see the comment there for why).
+        """
         if not self.tool_registry.has_tools():
             return messages
 
         tool_context = {"character_name": character_name, "user_name": user_name, "system_ref": self}
         schemas = self.tool_registry.get_schemas()
-        working_messages = [msg.copy() for msg in messages]
-
-        tool_directive = (
-            "[CRITICAL SYSTEM DIRECTIVE — TOOL USAGE]\n"
-            "You have access to real-time interactive tools (web search, calculator, date/time, system info, clipboard, URL opener). "
-            "Examine the user's query carefully. If it asks about real-world facts, current events, recent news, "
-            "specific dates, time, math calculations, URLs, or information you aren't 100% sure about, "
-            "YOU MUST ALWAYS CALL THE APPROPRIATE TOOL FIRST using function calling before answering."
-        )
-
-        if working_messages and working_messages[0]["role"] == "system":
-            working_messages[0]["content"] += f"\n\n{tool_directive}"
-        else:
-            working_messages.insert(0, {"role": "system", "content": tool_directive})
+        working_messages = self._append_tool_directive(messages)
 
         for _ in range(self.MAX_TOOL_LOOP_ITERATIONS):
             try:
@@ -1122,67 +1117,219 @@ class InterfaceSignals():
             if not raw_tool_calls:
                 break
 
-            normalized_calls = [normalize_tool_call(tc) for tc in raw_tool_calls]
-            normalized_calls = [c for c in normalized_calls if c.get("name")]
-            if not normalized_calls:
+            if not await self._execute_tool_calls_and_append(
+                working_messages, raw_tool_calls, result.get("content"),
+                tool_context, character_name, user_name
+            ):
                 break
 
-            assistant_tool_calls = []
-            for i, c in enumerate(normalized_calls):
-                raw_tc = raw_tool_calls[i] if i < len(raw_tool_calls) else {}
-                
-                sig = None
-                if isinstance(raw_tc, dict):
-                    sig = raw_tc.get("thought_signature") or raw_tc.get("extra_content", {}).get("google", {}).get("thought_signature")
-                else:
-                    sig = getattr(raw_tc, "thought_signature", None)
-                    if not sig and hasattr(raw_tc, "extra_content"):
-                        sig = getattr(raw_tc, "extra_content", {}).get("google", {}).get("thought_signature", None)
-                
-                if not sig:
-                    sig = "skip_thought_signature_validator"
+        return working_messages
 
-                assistant_tool_calls.append({
-                    "id": c["id"] or f"call_{i}",
+    def _append_tool_directive(self, messages) -> list:
+        """Messages copy with the tool directive riding inside the LAST user
+        message. llama-server's KV cache is prefix-based, so mutating
+        messages[0] (the system prompt) invalidated the whole cached prefix
+        and forced a full re-evaluation; a suffix-only change keeps it."""
+        working_messages = [msg.copy() for msg in messages]
+        tool_directive = (
+            "[CRITICAL SYSTEM DIRECTIVE — TOOL USAGE]\n"
+            "You have access to real-time interactive tools (web search, calculator, date/time, system info, clipboard, URL opener). "
+            "Examine the user's query carefully. If it asks about real-world facts, current events, recent news, "
+            "specific dates, time, math calculations, URLs, or information you aren't 100% sure about, "
+            "YOU MUST ALWAYS CALL THE APPROPRIATE TOOL FIRST using function calling before answering."
+        )
+        if working_messages and working_messages[-1].get("role") == "user":
+            working_messages[-1] = dict(working_messages[-1])
+            working_messages[-1]["content"] += f"\n\n{tool_directive}"
+        else:
+            working_messages.append({"role": "user", "content": tool_directive})
+        return working_messages
+
+    async def _stream_with_tool_loop(self, provider, messages, gen_kwargs, character_name, user_name):
+        """Streaming chat with tools handled inline — no non-streaming pre-pass.
+
+        The old flow ran a second, non-streaming request purely to detect tool
+        calls before the real streaming one. On the embedded llama-server that
+        cost a full prompt re-evaluation plus a throwaway generation
+        (measured ~32 s per turn) and broke KV prefix caching for both
+        requests. Here the tool schemas ride in the streaming request itself:
+        text deltas go to the UI/TTS in realtime, tool_call deltas are
+        accumulated silently, executed, and the loop continues streaming with
+        the tool results appended.
+        """
+        tool_context = {"character_name": character_name, "user_name": user_name, "system_ref": self}
+        schemas = self.tool_registry.get_schemas()
+        working_messages = self._append_tool_directive(messages)
+
+        for _ in range(self.MAX_TOOL_LOOP_ITERATIONS):
+            pending_calls: dict = {}
+
+            async for chunk in provider.generate_stream(working_messages, tools=schemas, **gen_kwargs):
+                if isinstance(chunk, str):
+                    yield chunk
+                    continue
+                for part in chunk.get("tool_call_deltas", []):
+                    idx = getattr(part, "index", 0) or 0
+                    slot = pending_calls.setdefault(idx, {"id": "", "name": "", "arguments": ""})
+                    part_id = getattr(part, "id", None)
+                    if part_id:
+                        slot["id"] = part_id
+                    fn = getattr(part, "function", None)
+                    if fn is not None:
+                        if getattr(fn, "name", None):
+                            slot["name"] += fn.name
+                        if getattr(fn, "arguments", None):
+                            slot["arguments"] += fn.arguments
+
+            if self.abort_generation:
+                return
+
+            raw_tool_calls = [
+                {
+                    "id": slot["id"] or None,
                     "type": "function",
-                    "function": {"name": c["name"], "arguments": json.dumps(c["arguments"])},
-                    "thought_signature": sig,
-                    "extra_content": {"google": {"thought_signature": sig}}
-                })
+                    "function": {"name": slot["name"], "arguments": slot["arguments"]},
+                }
+                for slot in pending_calls.values()
+                if slot["name"]
+            ]
+            if not raw_tool_calls:
+                return
 
-            working_messages.append({
-                "role": "assistant",
-                "content": result.get("content"),
-                "tool_calls": assistant_tool_calls,
+            if not await self._execute_tool_calls_and_append(
+                working_messages, raw_tool_calls, None,
+                tool_context, character_name, user_name
+            ):
+                return
+
+    async def _execute_tool_calls_and_append(self, working_messages, raw_tool_calls,
+                                             assistant_content, tool_context,
+                                             character_name, user_name) -> bool:
+        """Normalize raw tool calls, execute them, append assistant + tool
+        result messages. Returns True when at least one call was executed."""
+        normalized_calls = [normalize_tool_call(tc) for tc in raw_tool_calls]
+        normalized_calls = [c for c in normalized_calls if c.get("name")]
+        if not normalized_calls:
+            return False
+
+        assistant_tool_calls = []
+        for i, c in enumerate(normalized_calls):
+            raw_tc = raw_tool_calls[i] if i < len(raw_tool_calls) else {}
+
+            sig = None
+            if isinstance(raw_tc, dict):
+                sig = raw_tc.get("thought_signature") or raw_tc.get("extra_content", {}).get("google", {}).get("thought_signature")
+            else:
+                sig = getattr(raw_tc, "thought_signature", None)
+                if not sig and hasattr(raw_tc, "extra_content"):
+                    sig = getattr(raw_tc, "extra_content", {}).get("google", {}).get("thought_signature", None)
+
+            if not sig:
+                sig = "skip_thought_signature_validator"
+
+            assistant_tool_calls.append({
+                "id": c["id"] or f"call_{i}",
+                "type": "function",
+                "function": {"name": c["name"], "arguments": json.dumps(c["arguments"])},
+                "thought_signature": sig,
+                "extra_content": {"google": {"thought_signature": sig}}
             })
 
-            for call, wire_call in zip(normalized_calls, assistant_tool_calls):
-                indicator = self._show_tool_usage_indicator(
-                    character_name,
-                    self.translations.get("tool_using_label", "using {tool}...").format(tool=call["name"])
-                )
-                try:
-                    QApplication.processEvents()
-                    start_time = time.time()
-                    
-                    tool_result = await self.tool_registry.execute(call["name"], call["arguments"], tool_context)
-                    
-                    elapsed = time.time() - start_time
-                    if elapsed < 0.35:
-                        await asyncio.sleep(0.35 - elapsed)
-                finally:
-                    self._remove_tool_usage_indicator(indicator)
+        working_messages.append({
+            "role": "assistant",
+            "content": assistant_content,
+            "tool_calls": assistant_tool_calls,
+        })
 
-                result_text = tool_result.get("result", "") if tool_result else ""
-                working_messages.append({
-                    "role": "tool",
-                    "tool_call_id": wire_call["id"],
-                    "name": call["name"],
-                    "content": result_text,
-                })
+        for call, wire_call in zip(normalized_calls, assistant_tool_calls):
+            indicator = self._show_tool_usage_indicator(
+                character_name,
+                self.translations.get("tool_using_label", "using {tool}...").format(tool=call["name"])
+            )
+            try:
+                QApplication.processEvents()
+                start_time = time.time()
 
-        return working_messages
+                tool_result = await self.tool_registry.execute(call["name"], call["arguments"], tool_context)
+
+                elapsed = time.time() - start_time
+                if elapsed < 0.35:
+                    await asyncio.sleep(0.35 - elapsed)
+            finally:
+                self._remove_tool_usage_indicator(indicator)
+
+            result_text = tool_result.get("result", "") if tool_result else ""
+            working_messages.append({
+                "role": "tool",
+                "tool_call_id": wire_call["id"],
+                "name": call["name"],
+                "content": result_text,
+            })
+
+        return True
     
+    def _styled_open_files_dialog(self, caption: str, file_filter: str) -> list:
+        """Readable file picker regardless of the system theme.
+
+        The app-wide stylesheet makes Qt use its non-native QFileDialog, whose
+        internal item views keep an UNSTYLED palette — dark text on the dark
+        background and missing sidebar icons (the 'broken' picker). Styling
+        the dialog instance directly fixes colors/contrast for every theme.
+        """
+        dialog = QFileDialog(
+            self.main_window, caption, os.path.expanduser("~"), file_filter
+        )
+        dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+        dialog.setDirectory(os.path.expanduser("~"))
+        dialog.setStyleSheet("""
+            QFileDialog { background-color: #1E1E1E; color: #D4D4D4; }
+            QFileDialog QListView, QFileDialog QTreeView,
+            QFileDialog QListView::item, QFileDialog QTreeView::item {
+                background-color: #252526; color: #D4D4D4; border: none;
+            }
+            QFileDialog QListView::item:selected, QFileDialog QTreeView::item:selected,
+            QFileDialog QListView::item:hover, QFileDialog QTreeView::item:hover {
+                background-color: #094771; color: #FFFFFF;
+            }
+            QFileDialog QLineEdit, QFileDialog QComboBox {
+                background-color: #252526; color: #D4D4D4;
+                border: 1px solid #3C3C3C; border-radius: 4px; padding: 3px 6px;
+            }
+            QFileDialog QComboBox QAbstractItemView {
+                background-color: #252526; color: #D4D4D4;
+                selection-background-color: #094771;
+            }
+            QFileDialog QPushButton {
+                background-color: #2D2D2D; color: #D4D4D4;
+                border: 1px solid #3C3C3C; border-radius: 4px; padding: 5px 14px;
+            }
+            QFileDialog QPushButton:hover { background-color: #3D3D3D; }
+            QFileDialog QHeaderView::section {
+                background-color: #2D2D2D; color: #D4D4D4; border: none; padding: 4px;
+            }
+            QFileDialog QSidebar { background-color: #1E1E1E; border: none; }
+            QFileDialog QSidebar QAbstractItemView::item { color: #D4D4D4; }
+            QFileDialog QSidebar QAbstractItemView::item:selected {
+                background-color: #094771; color: #FFFFFF;
+            }
+            QScrollBar:vertical, QScrollBar:horizontal {
+                background-color: #1E1E1E; border: none;
+            }
+            QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
+                background-color: #3C3C3C; border-radius: 5px; min-height: 30px; min-width: 30px;
+            }
+        """)
+        # Sidebar/toolbar icons come from the system icon theme; a bare launch
+        # environment can leave it empty (invisible icons).
+        if not QtGui.QIcon.themeName():
+            for theme in ("breeze-dark", "breeze", "Papirus-Dark", "Adwaita-dark", "Adwaita"):
+                QtGui.QIcon.setThemeName(theme)
+                if not QtGui.QIcon.fromTheme("folder-open").isNull():
+                    break
+        if dialog.exec():
+            return dialog.selectedFiles()
+        return []
+
     def open_attach_file_dialog(self):
         if len(self.pending_attachments) >= self.MAX_ATTACHMENTS_PER_MESSAGE:
             sow_toast(
@@ -1203,10 +1350,8 @@ class InterfaceSignals():
             "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif);;"
             "All Files (*)"
         )
-        file_paths, _ = QFileDialog.getOpenFileNames(
-            self.main_window,
+        file_paths = self._styled_open_files_dialog(
             self.translations.get("attach_file_dialog_title", "Attach files to your message"),
-            "",
             file_filter
         )
         if not file_paths:
@@ -13754,6 +13899,11 @@ class InterfaceSignals():
                     self.server_thread = VRMServerThread(preferred_port=8001)
                     self.server_thread.start()
 
+                # Wait for the actual port bind (the thread can fall back to
+                # another port) before building the URL — see vrm_server.py.
+                if not self.server_thread.ready.wait(timeout=5):
+                    logger.error("VRM HTTP server failed to bind a port; loading the model page anyway.")
+
                 html_url = f"http://127.0.0.1:{self.server_thread.port}/app/utils/emotions/vrm_module.html"
                 
                 if vrm_model_file:
@@ -15096,11 +15246,20 @@ class InterfaceSignals():
             if not provider:
                 raise ValueError(f"Unknown conversation method: {conversation_method}")
 
-            if self.tools_enabled and self.tool_registry.has_tools():
-                messages = await self.run_tool_loop(provider, messages, character_name, user_name)
-
             gen_kwargs = self._get_gen_kwargs(conversation_method)
-            generator = provider.generate_stream(messages, **gen_kwargs)
+            if self.tools_enabled and self.tool_registry.has_tools():
+                if getattr(provider, "supports_stream_tools", False):
+                    # Tools ride in the streaming request: no non-streaming
+                    # pre-pass, so there is no second prompt evaluation and no
+                    # throwaway generation before the reply starts.
+                    generator = self._stream_with_tool_loop(
+                        provider, messages, gen_kwargs, character_name, user_name
+                    )
+                else:
+                    messages = await self.run_tool_loop(provider, messages, character_name, user_name)
+                    generator = provider.generate_stream(messages, **gen_kwargs)
+            else:
+                generator = provider.generate_stream(messages, **gen_kwargs)
 
             try:
                 sentence_buffer_chat = ""
@@ -15236,6 +15395,12 @@ class InterfaceSignals():
                     try: typing_widget.deleteLater()
                     except: pass
                 logger.error(f"Generation Engine Error: {e}")
+
+            # The reply stream is over — no more sentences will be queued, so
+            # the TTS worker's batch grow-phase stops waiting and generates
+            # immediately with what it has.
+            if hasattr(self, 'chat_tts_worker') and self.chat_tts_worker:
+                self.chat_tts_worker.finish_stream()
 
             if not first_chunk_received:
                 if 'typing_widget' in locals() and typing_widget:
@@ -15497,11 +15662,20 @@ class InterfaceSignals():
 
         provider = AIFactory.get_provider(conversation_method)
         if provider:
-            if self.tools_enabled and self.tool_registry.has_tools():
-                messages = await self.run_tool_loop(provider, messages, character_name, user_name)
-
             gen_kwargs = self._get_gen_kwargs(conversation_method)
-            generator = provider.generate_stream(messages, **gen_kwargs)
+            if self.tools_enabled and self.tool_registry.has_tools():
+                if getattr(provider, "supports_stream_tools", False):
+                    # Tools ride in the streaming request: no non-streaming
+                    # pre-pass, so there is no second prompt evaluation and no
+                    # throwaway generation before the reply starts.
+                    generator = self._stream_with_tool_loop(
+                        provider, messages, gen_kwargs, character_name, user_name
+                    )
+                else:
+                    messages = await self.run_tool_loop(provider, messages, character_name, user_name)
+                    generator = provider.generate_stream(messages, **gen_kwargs)
+            else:
+                generator = provider.generate_stream(messages, **gen_kwargs)
 
             async for chunk in generator:
                 if chunk:
@@ -15689,6 +15863,10 @@ class InterfaceSignals():
             )
 
             gen_kwargs = self._get_gen_kwargs(conversation_method)
+            # A summary is a few sentences. Uncapped, the model kept writing
+            # 700+ tokens (~60 s) while occupying the only server slot and
+            # evicting the chat KV cache.
+            gen_kwargs["max_tokens"] = min(int(gen_kwargs.get("max_tokens") or 400), 400)
 
             async for chunk in provider.generate_summary(summary_messages, **gen_kwargs):
                 full_new_summary += chunk

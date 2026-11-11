@@ -29,6 +29,7 @@ export VIRTUAL_ENV="$PWD/.venv"
 # (SOW_CONFIG_DIR > XDG_CONFIG_HOME > ~/.config/soul-of-waifu);
 # здесь ничего не форсируем, чтобы не перекрывать XDG_CONFIG_HOME.
 export HF_HOME="$PWD/app/models/hf_cache"
+export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
 # QtWebEngine needs no-sandbox without privileged helper user namespaces config.
 # NVIDIA + XWayland: Chromium reports "GBM is not supported ... Fallback to Vulkan
 # rendering" and the ANGLE-Vulkan GPU process crashes, taking the whole app down

@@ -31,7 +31,7 @@ from PyQt6.QtWebEngineCore import QWebEnginePage
 
 from app.gui.sowSystem import SOW_System
 from app.configuration import configuration
-from app.utils.ai_clients.local_server_manager import LocalServerManager
+from app.utils.ai_clients.local_server_manager import get_shared_server_manager
 from app.utils.ai_clients.prompt_engine import (
     PromptEngine, strip_partial_state_tag, extract_state_update,
     strip_partial_reasoning_tag, extract_reasoning, find_reasoning_open, find_reasoning_close
@@ -105,7 +105,7 @@ class Soul_Of_Waifu_System(QtCore.QObject):
                 self.load_translation("ru")
 
         self.prompt_engine = PromptEngine()
-        self.local_server_manager = LocalServerManager(self.ui)
+        self.local_server_manager = get_shared_server_manager(ui=self.ui)
 
         self.translator = Translator()
         self.tokenizer = None
@@ -687,6 +687,13 @@ class Soul_Of_Waifu_System(QtCore.QObject):
 
                 self.server_thread = VRMServerThread(preferred_port=8002)
                 self.server_thread.start()
+
+                # The thread may fall back to another port (8001/8003/...) when
+                # the preferred one is taken — wait for the actual bind before
+                # building the URL, or the webview loads from a dead port and
+                # the model silently disappears (blank page).
+                if not self.server_thread.ready.wait(timeout=5):
+                    logger.error("VRM HTTP server failed to bind a port; loading the model page anyway.")
 
                 html_url = f"http://127.0.0.1:{self.server_thread.port}/app/utils/emotions/vrm_module.html"
                 

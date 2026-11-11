@@ -56,7 +56,11 @@ class VRMServerThread(threading.Thread):
         self.port = preferred_port
         self.daemon = True
         self.server = None
-        
+        # Set once the socket is actually bound: callers must wait for it
+        # before building URLs, otherwise a second instance / a restarted
+        # chat can race and the webview loads from a stale or dead port.
+        self.ready = threading.Event()
+
         self.project_root = os.path.abspath(
             os.path.join(os.path.dirname(__file__), "..", "..")
         )
@@ -74,6 +78,7 @@ class VRMServerThread(threading.Thread):
                 TCPServer.allow_reuse_address = True
                 self.server = TCPServer(("127.0.0.1", try_port), handler)
                 self.port = try_port
+                self.ready.set()
                 logger.info(f"VRM Secure HTTP server started on http://127.0.0.1:{try_port}")
                 break
             except OSError:
@@ -88,6 +93,7 @@ class VRMServerThread(threading.Thread):
             logger.error("Could not start VRM HTTP server on any available port")
 
     def stop(self):
+        self.ready.clear()
         if self.server:
             try:
                 self.server.shutdown()

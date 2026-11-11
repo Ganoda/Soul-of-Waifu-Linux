@@ -651,28 +651,14 @@ class PromptEngine:
             if content:
                 for key, value in replacements.items():
                     content = content.replace(key, str(value))
-                
+
                 system_blocks.append({"role": "system", "content": content})
                 current_token_count += self.count_tokens(content)
 
-        if state_prompt_block:
-            for key, value in replacements.items():
-                state_prompt_block = state_prompt_block.replace(key, str(value))
-
-            system_blocks.append({"role": "system", "content": state_prompt_block})
-            current_token_count += self.count_tokens(state_prompt_block)
-
-        # Reply-language directive (config ui.yaml `reply_language`).
-        # Missing key -> no directive, preserving legacy prompts verbatim.
-        try:
-            reply_language = xconfig.load("ui").get("reply_language")
-            language_directive = get_language_directive(reply_language)
-        except Exception as e:
-            logger.warning(f"[Prompt Engine] Failed to resolve reply_language: {e}")
-            language_directive = None
-        if language_directive:
-            system_blocks.append({"role": "system", "content": language_directive})
-            current_token_count += self.count_tokens(language_directive)
+        # NOTE: the per-turn volatile blocks (soul memory topics, character
+        # state) are appended AFTER this loop, at the very end of the system
+        # message — see the comment there. Everything above is stable between
+        # turns, which is what lets llama-server reuse its KV prompt cache.
 
         final_user_message = user_message
         if activated_entries["scenario"]:
@@ -778,9 +764,35 @@ class PromptEngine:
                 if soul_memory_content:
                     system_blocks.append({"role": "system", "content": soul_memory_content})
                     current_token_count += self.count_tokens(soul_memory_content)
-                    
+
             except Exception as e:
                 logger.error(f"[Soul Memory] Semantic Search Error: {e}", exc_info=True)
+
+        # Volatile blocks come LAST in the system message on purpose: llama-
+        # server's KV cache is prefix-based, so a block that changes every
+        # turn invalidates everything placed after it. With this order the
+        # per-turn re-evaluation covers only these tail blocks (~500 tokens)
+        # instead of the whole history (~4500 tokens) — that is most of the
+        # time-to-first-token.
+        if state_prompt_block:
+            for key, value in replacements.items():
+                state_prompt_block = state_prompt_block.replace(key, str(value))
+
+            system_blocks.append({"role": "system", "content": state_prompt_block})
+            current_token_count += self.count_tokens(state_prompt_block)
+
+        # Reply-language directive (config ui.yaml `reply_language`).
+        # Missing key -> no directive, preserving legacy prompts verbatim.
+        # Kept last: a final instruction is also the most likely to be obeyed.
+        try:
+            reply_language = xconfig.load("ui").get("reply_language")
+            language_directive = get_language_directive(reply_language)
+        except Exception as e:
+            logger.warning(f"[Prompt Engine] Failed to resolve reply_language: {e}")
+            language_directive = None
+        if language_directive:
+            system_blocks.append({"role": "system", "content": language_directive})
+            current_token_count += self.count_tokens(language_directive)
 
         if system_blocks:
             merged_system_content = "\n\n".join(

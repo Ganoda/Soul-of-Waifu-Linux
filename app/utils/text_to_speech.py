@@ -5,6 +5,13 @@ import uuid
 import queue
 import time
 import shutil
+import concurrent.futures
+
+# Must be set before torch initializes its CUDA allocator: the TTS models
+# share the GPU with llama-server, whose compute buffers grow/shrink around
+# them — without expandable segments the allocator fragments and OOMs early.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import torch
 import asyncio
 import logging
@@ -416,9 +423,12 @@ class KokoroTTS_SOW_System:
 
         configuration_data = self.configuration_characters.load_configuration()
         char_config = configuration_data["character_list"][character_name]
-        kokoro_voice_name = char_config["voice_type"]
-        kokoro_rvc_enabled = char_config["rvc_enabled"]
-        kokoro_rvc_file = char_config["rvc_file"]
+        # A character set up for another engine (e.g. Qwen cloning) has an
+        # empty voice_type; an empty name made Kokoro fetch "voices/.pt"
+        # (HTTP 404) every time this fallback chain was walked.
+        kokoro_voice_name = char_config.get("voice_type") or "af_heart"
+        kokoro_rvc_enabled = char_config.get("rvc_enabled")
+        kokoro_rvc_file = char_config.get("rvc_file")
 
         def _generate():
             generator = self.pipeline(text, voice=kokoro_voice_name)
@@ -576,11 +586,105 @@ class Qwen3TTS_SOW_System:
         self.rvc = None
         self.rvc_loaded = False
 
+        # Caches: characters.json used to be re-parsed on every sentence (and
+        # racing writers occasionally produced truncated JSON, silently
+        # dropping the engine to the fallback chain); the voice-clone prompt
+        # re-encoded the reference audio (speech tokenizer + speaker embedding
+        # extraction) on every call — seconds of pure overhead per sentence.
+        self._char_cfg_cache = None
+        self._char_cfg_key = None
+        self._clone_prompt_cache = {}
+        self._tts_executor = None
+
+    def _get_tts_executor(self):
+        """Dedicated single-thread executor for blocking TTS work.
+
+        The event loop's default executor was observed dying mid-session
+        ('cannot schedule new futures after shutdown', right after a CUDA OOM
+        in a worker thread), which killed every subsequent batch attempt.
+        Owning the pool makes generation self-healing: _run_blocking recreates
+        it if that ever happens again.
+        """
+        if self._tts_executor is None:
+            self._tts_executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="qwen-tts"
+            )
+        return self._tts_executor
+
+    async def _run_blocking(self, fn, *args):
+        loop = asyncio.get_running_loop()
+        try:
+            return await loop.run_in_executor(self._get_tts_executor(), lambda: fn(*args))
+        except RuntimeError as e:
+            if "after shutdown" not in str(e):
+                raise
+            self._tts_executor = None
+            return await loop.run_in_executor(self._get_tts_executor(), lambda: fn(*args))
+
+    def _get_char_config(self, character_name: str) -> dict:
+        """characters.json read, cached per file mtime, with a retry loop.
+
+        Concurrent config writers can momentarily expose truncated JSON
+        ('Unterminated string'); retrying instead of failing keeps the
+        sentence on the Qwen engine.
+        """
+        try:
+            mtime = os.path.getmtime(self.configuration_characters.characters_path)
+        except OSError:
+            mtime = None
+        key = (character_name, mtime)
+        if self._char_cfg_key == key and self._char_cfg_cache is not None:
+            return self._char_cfg_cache
+
+        last_err = None
+        for _ in range(3):
+            try:
+                data = self.configuration_characters.load_configuration()
+                char_config = data["character_list"].get(character_name, {})
+                self._char_cfg_cache = char_config
+                self._char_cfg_key = key
+                return char_config
+            except Exception as e:
+                last_err = e
+                time.sleep(0.15)
+        logger.warning(f"Qwen3-TTS: characters.json read failed ({last_err}); using cached config")
+        return self._char_cfg_cache or {}
+
+    def _get_voice_clone_prompt(self, ref_path: str, ref_text: str):
+        """Voice-clone prompt cached per reference file.
+
+        create_voice_clone_prompt() re-runs the speech tokenizer and speaker
+        embedding extraction over the reference wav on every call; the result
+        only depends on the audio file itself.
+        """
+        try:
+            mtime = os.path.getmtime(ref_path)
+        except OSError:
+            mtime = None
+        key = (ref_path, bool(ref_text), mtime)
+        cached = self._clone_prompt_cache.get(key)
+        if cached is not None:
+            return cached
+
+        if not ref_text:
+            logger.warning(
+                f"Qwen3-TTS: no 'qwen_cloning_ref_text' set for '{ref_path}'; "
+                f"using x_vector_only_mode (cloning quality may be reduced)."
+            )
+        items = self.model.create_voice_clone_prompt(
+            ref_audio=ref_path,
+            ref_text=ref_text or None,
+            x_vector_only_mode=not bool(ref_text),
+        )
+        if len(self._clone_prompt_cache) > 4:
+            self._clone_prompt_cache.clear()
+        self._clone_prompt_cache[key] = items
+        return items
+
     async def _load_tts(self, character_name: str):
         if not self.tts_loaded:
             try:
-                configuration_data = self.configuration_characters.load_configuration()
-                char_config = configuration_data["character_list"].get(character_name, {})
+                char_config = self._get_char_config(character_name)
 
                 model_size = char_config.get("qwen_model_size", "1.7B")
                 qwen_mode = char_config.get("qwen_mode", "presets")
@@ -612,6 +716,23 @@ class Qwen3TTS_SOW_System:
                 model_name = f"Qwen/Qwen3-TTS-12Hz-{model_size}-{variant}"
 
                 def _init():
+                    if target_device_map == "auto":
+                        # device_map="auto" silently spreads layers by leftover
+                        # VRAM and parks the overflow on CPU — generation slows
+                        # down several-fold. Pin the whole model to the GPU
+                        # first; only fall back to "auto" if it doesn't fit.
+                        try:
+                            return Qwen3TTSModel.from_pretrained(
+                                model_name,
+                                dtype=target_dtype,
+                                device_map={"": "cuda:0"},
+                                attn_implementation="sdpa",
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                f"Qwen3-TTS: full-GPU pin failed ({e}); "
+                                "falling back to device_map='auto'."
+                            )
                     model = Qwen3TTSModel.from_pretrained(
                         model_name,
                         dtype=target_dtype,
@@ -660,12 +781,18 @@ class Qwen3TTS_SOW_System:
                             
                     return model
 
-                self.model = await asyncio.to_thread(_init)
+                self.model = await self._run_blocking(_init)
                 self.tts_loaded = True
                 
                 logger.info(f"Qwen3-TTS {model_size}-{variant} loaded on {self.device.upper()} for '{character_name}'")
 
             except Exception as e:
+                if "out of memory" in str(e).lower():
+                    logger.error(
+                        "Qwen3-TTS: CUDA out of memory while loading. llama-server is keeping too much "
+                        "VRAM for the TTS model to fit next to it. Lower 'GPU layers' in Options "
+                        "(e.g. 40) or switch this character to the 0.6B TTS model."
+                    )
                 logger.error(f"Failed to load Qwen3-TTS for {character_name}: {e}")
                 raise RuntimeError(f"Failed to load Qwen3-TTS: {e}")
 
@@ -679,7 +806,7 @@ class Qwen3TTS_SOW_System:
                         device="cuda:0" if torch.cuda.is_available() else "cpu:0",
                         f0up_key=f0up_key, index_rate=index_rate, protect=protect
                     )
-                self.rvc = await asyncio.to_thread(_init)
+                self.rvc = await self._run_blocking(_init)
                 self.rvc_loaded = True
                 logger.info("RVC model loaded successfully.")
             except Exception as e:
@@ -689,8 +816,7 @@ class Qwen3TTS_SOW_System:
     async def generate_speech_with_qwen3(self, text: str, character_name: str):
         await self._load_tts(character_name)
 
-        configuration_data = self.configuration_characters.load_configuration()
-        char_config = configuration_data["character_list"][character_name]
+        char_config = self._get_char_config(character_name)
 
         qwen_mode = char_config.get("qwen_mode", "presets")
         voice_type = char_config.get("voice_type", "Serena")
@@ -725,24 +851,14 @@ class Qwen3TTS_SOW_System:
 
                     with autocast_ctx:
                         if qwen_mode == "cloning" and qwen_ref_path and os.path.exists(qwen_ref_path):
-                            # Voice Cloning
-                            if qwen_ref_text:
-                                wavs, sr = self.model.generate_voice_clone(
-                                    ref_audio=qwen_ref_path,
-                                    ref_text=qwen_ref_text,
-                                    **generation_params
-                                )
-                            else:
-                                logger.warning(
-                                    f"Qwen3-TTS: no 'qwen_cloning_ref_text' set for "
-                                    f"'{character_name}'; using x_vector_only_mode "
-                                    f"(cloning quality may be reduced)."
-                                )
-                                wavs, sr = self.model.generate_voice_clone(
-                                    ref_audio=qwen_ref_path,
-                                    x_vector_only_mode=True,
-                                    **generation_params
-                                )
+                            # Voice Cloning — the prompt (speaker embedding /
+                            # ref codes) is cached per reference file instead
+                            # of being rebuilt for every sentence.
+                            prompt_items = self._get_voice_clone_prompt(qwen_ref_path, qwen_ref_text)
+                            wavs, sr = self.model.generate_voice_clone(
+                                voice_clone_prompt=prompt_items,
+                                **generation_params
+                            )
 
                         elif qwen_mode == "prompt" and qwen_prompt:
                             # Voice Design
@@ -771,7 +887,7 @@ class Qwen3TTS_SOW_System:
                 logger.error(f"Qwen3 TTS generation error: {e}")
                 raise
 
-        await asyncio.to_thread(_generate)
+        await self._run_blocking(_generate)
 
         if qwen_rvc_enabled and qwen_rvc_file:
             f0up_key = char_config.get("rvc_f0up_key", 0)
@@ -801,6 +917,105 @@ class Qwen3TTS_SOW_System:
 
         return base_output_file
 
+    async def generate_speech_batch_with_qwen3(self, texts, character_name: str):
+        """Batched generation: several sentences synthesized in ONE model pass.
+
+        Qwen3-TTS is latency-bound per token step (~0.1 s/step on a mid GPU),
+        so a single short sentence takes longer to generate than to play
+        (RTF ~1.3 measured on RTX 3060) and per-sentence generation can never
+        keep speech continuous. A batch of N sentences runs in the same number
+        of autoregressive steps as its longest member, i.e. N× the audio for
+        roughly the same wall time.
+
+        Returns a list of wav paths matching `texts`, or None when batching is
+        not applicable (single text, RVC post-processing, generation error) —
+        the caller then falls back to the per-sentence engine chain.
+        """
+        if not texts or len(texts) < 2:
+            return None
+
+        await self._load_tts(character_name)
+        char_config = self._get_char_config(character_name)
+
+        qwen_mode = char_config.get("qwen_mode", "presets")
+        voice_type = char_config.get("voice_type", "Serena")
+        qwen_prompt = char_config.get("qwen_prompt", "")
+        qwen_ref_path = char_config.get("qwen_cloning_ref_path", "")
+        qwen_ref_text = char_config.get("qwen_cloning_ref_text", "")
+        language = char_config.get("qwen_language", "English")
+
+        # RVC post-processing is per-file; keep those characters on the
+        # per-sentence path.
+        if char_config.get("rvc_enabled", False):
+            return None
+
+        os.makedirs("app/voices/qwen_audio", exist_ok=True)
+
+        def _generate():
+            gen_params = {
+                "max_new_tokens": 1500,
+                "temperature": 0.7,
+                "top_p": 0.9,
+            }
+            with torch.no_grad():
+                if qwen_mode == "cloning" and qwen_ref_path and os.path.exists(qwen_ref_path):
+                    prompt_items = self._get_voice_clone_prompt(qwen_ref_path, qwen_ref_text)
+                    wavs, sr = self.model.generate_voice_clone(
+                        text=texts, language=language,
+                        voice_clone_prompt=prompt_items * len(texts),
+                        **gen_params
+                    )
+                elif qwen_mode == "prompt" and qwen_prompt:
+                    wavs, sr = self.model.generate_voice_design(
+                        text=texts, instruct=qwen_prompt, **gen_params
+                    )
+                else:
+                    wavs, sr = self.model.generate_custom_voice(
+                        text=texts, speaker=voice_type,
+                        instruct=char_config.get("qwen_style_instruct", ""),
+                        **gen_params
+                    )
+
+            files = []
+            for audio in wavs:
+                if isinstance(audio, torch.Tensor):
+                    audio = audio.detach().cpu().to(torch.float32).numpy()
+                elif isinstance(audio, np.ndarray):
+                    audio = audio.astype(np.float32)
+                output_file = f"app/voices/qwen_audio/qwen_output_{uuid.uuid4().hex}.wav"
+                sf.write(output_file, audio, sr)
+                files.append(output_file)
+            return files
+
+        try:
+            files = await self._run_blocking(_generate)
+        except torch.cuda.OutOfMemoryError:
+            # llama-server transiently holds its compute buffers while it
+            # processes the prompt; releasing our allocator cache and retrying
+            # usually fits. If not, the per-sentence fallback needs far less.
+            logger.warning("Qwen3-TTS: batch OOM — releasing allocator cache and retrying once")
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+            try:
+                files = await self._run_blocking(_generate)
+            except Exception as e:
+                logger.warning(f"Qwen3-TTS: batch OOM on retry ({e}); falling back per sentence")
+                return None
+        except Exception as e:
+            if "out of memory" in str(e).lower():
+                logger.error(
+                    "Qwen3-TTS: CUDA out of memory during batch generation. llama-server + TTS no longer "
+                    "fit together — lower 'GPU layers' in Options (e.g. 40) or use the 0.6B TTS model."
+                )
+            logger.warning(f"Qwen3-TTS: batch generation failed ({e}); falling back per sentence")
+            return None
+
+        if not files or len(files) != len(texts):
+            return None
+        return files
+
 class AudioPlaybackWorker(QThread):
     queue_empty_signal = pyqtSignal()
     lipsync_signal = pyqtSignal(float)
@@ -815,6 +1030,34 @@ class AudioPlaybackWorker(QThread):
     def add_audio_file(self, file_path, persist=False):
         self.interrupt_flag = False
         self.queue.put((file_path, persist))
+
+    def _device_output_rate(self) -> int:
+        """Declared default rate of the configured output device (fallback 44100)."""
+        try:
+            index = self.device_index
+            if index is None:
+                index = sd.query_devices(kind='output')['index']
+            rate = int(sd.query_devices(index)['default_samplerate'])
+            return rate if rate > 0 else 44100
+        except Exception:
+            return 44100
+
+    @staticmethod
+    def _resample(data, sr_in: int, sr_out: int):
+        """Linear-interpolation resample; keeps float32 and channel layout."""
+        if not sr_in or sr_in == sr_out:
+            return data
+        n_out = int(round(data.shape[0] * sr_out / sr_in))
+        if n_out < 1:
+            return data
+        x_new = np.linspace(0.0, data.shape[0] - 1, num=n_out)
+        x_old = np.arange(data.shape[0])
+        if data.ndim == 1:
+            return np.interp(x_new, x_old, data).astype(np.float32)
+        return np.stack(
+            [np.interp(x_new, x_old, data[:, c]) for c in range(data.shape[1])],
+            axis=1,
+        ).astype(np.float32)
 
     def clear_queue(self):
         self.interrupt_flag = True
@@ -855,7 +1098,29 @@ class AudioPlaybackWorker(QThread):
                 try:
                     data, samplerate = sf.read(file_path, dtype='float32')
                     sd.default.device = self.device_index
-                    sd.play(data, samplerate)
+
+                    # Neural TTS engines emit 24 kHz while raw ALSA hw devices
+                    # only accept their declared rate (44.1/48 kHz) — PortAudio
+                    # answers paInvalidSampleRate (-9997). Resample to the
+                    # device's rate and, if the stream still refuses (channel
+                    # count restrictions), retry mono->stereo, then the default
+                    # output device.
+                    try:
+                        sd.play(data, samplerate)
+                    except sd.PortAudioError:
+                        dev_rate = self._device_output_rate()
+                        data = self._resample(data, samplerate, dev_rate)
+                        samplerate = dev_rate
+                        try:
+                            sd.play(data, samplerate)
+                        except sd.PortAudioError:
+                            if data.ndim == 1:
+                                data = np.stack([data, data], axis=1)
+                            try:
+                                sd.play(data, samplerate)
+                            except sd.PortAudioError:
+                                sd.default.device = None
+                                sd.play(data, samplerate)
 
                     duration = len(data) / samplerate
                     chunk_size = int(samplerate * 0.05)
@@ -916,11 +1181,24 @@ class TTSWorker(QThread):
     audio_ready_signal = pyqtSignal(str)
     segment_saved_signal = pyqtSignal(str, str)
 
+    # Qwen-3 TTS: max sentences synthesized in one model pass. The model is
+    # latency-bound per token step, so a batch costs about as much as its
+    # longest sentence while producing the audio of all of them.
+    QWEN_TTS_BATCH_MAX = 6
+    # The worker briefly waits for the next streamed sentences to join the
+    # batch: a group of 1 generates SLOWER than realtime (RTF ~1.3), a group
+    # of 3+ is what keeps playback continuous.
+    QWEN_TTS_GROW_TARGET = 3
+    QWEN_TTS_GROW_WAIT_SEC = 2.0
+
     def __init__(self, tts_method, character_name, voice_id=None, language="en"):
         super().__init__()
         self.queue = queue.Queue()
         self.is_running = True
         self.discard_current = False
+        # True while the LLM reply is still streaming (more sentences coming);
+        # finish_stream() flips it off so the batch grow-phase stops waiting.
+        self._stream_active = False
 
         self.tts_method = tts_method
         self.character_name = character_name
@@ -1015,15 +1293,17 @@ class TTSWorker(QThread):
     def add_text(self, text, message_id=None):
         if not text:
             return
-            
+
+        self._stream_active = True
+
         text = self.clean_text_for_speech(text)
         if not text:
             return
 
         raw_sentences = re.split(r'(?<=[.!?])\s+', text)
         current_chunk = ""
-        max_chunk_len = 450 
-        
+        max_chunk_len = 450
+
         def _enqueue(chunk_text):
             if chunk_text:
                 self.queue.put((chunk_text, message_id))
@@ -1032,12 +1312,12 @@ class TTSWorker(QThread):
             sentence = sentence.strip()
             if not sentence:
                 continue
-                
+
             if len(sentence) > max_chunk_len:
                 if current_chunk:
                     _enqueue(current_chunk)
                     current_chunk = ""
-                
+
                 sub_chunks = re.split(r'(?<=[,;])\s', sentence)
                 for sub in sub_chunks:
                     sub = sub.strip()
@@ -1055,9 +1335,14 @@ class TTSWorker(QThread):
                         current_chunk += " " + sentence
                     else:
                         current_chunk = sentence
-        
+
         if current_chunk:
             _enqueue(current_chunk)
+
+    def finish_stream(self):
+        """The LLM reply finished streaming: no more sentences are coming, so
+        the Qwen batch grow-phase stops waiting and starts immediately."""
+        self._stream_active = False
 
     def _persist_segment_for_replay(self, source_file, message_id):
         if not source_file or not os.path.exists(source_file):
@@ -1167,10 +1452,33 @@ class TTSWorker(QThread):
         with self.queue.mutex:
             self.queue.queue.clear()
         self.discard_current = True
+        self._stream_active = False
         self._in_tts_quote = False
         self._in_asterisk = False
         if hasattr(self, 'playback_worker'):
             self.playback_worker.clear_queue()
+
+    def _deliver_output(self, output_file, message_id):
+        """Encode + persist + queue one finished wav for playback."""
+        if not output_file or not os.path.exists(output_file):
+            return
+        try:
+            import base64
+            with open(output_file, "rb") as f:
+                b64_audio = base64.b64encode(f.read()).decode("utf-8")
+            self.audio_ready_signal.emit(b64_audio)
+        except Exception as e:
+            logger.error(f"Error encoding audio for web client: {e}")
+
+        if message_id:
+            try:
+                relative_path = self._persist_segment_for_replay(output_file, message_id)
+                if relative_path:
+                    self.segment_saved_signal.emit(message_id, relative_path)
+            except Exception as e:
+                logger.error(f"Failed to persist TTS segment for replay: {e}")
+
+        self.playback_worker.add_audio_file(output_file)
 
     def run(self):
         logger.info(f"TTS Worker Started ({self.tts_method})")
@@ -1190,39 +1498,105 @@ class TTSWorker(QThread):
 
                 if text:
                     self.discard_current = False
-                    logger.info(f"Generating Audio for: {text[:30]}...")
-                    output_file = self._generate_with_engine_chain(loop, text)
 
-                    if self.discard_current:
-                        logger.info("TTS finished, but was interrupted. Discarding audio.")
-                        if output_file and os.path.exists(output_file):
+                    # Qwen-3 TTS: GROW PHASE — while the reply is still
+                    # streaming, newly arrived sentences are folded into this
+                    # batch instead of being generated one by one. Per-sentence
+                    # generation is slower than realtime (RTF ~1.3 measured),
+                    # so a lone first sentence is exactly what produced the
+                    # silent gap after it: the follow-up batch outgrew the
+                    # playback head start. A bounded wait (~2 s, target 3
+                    # sentences) buys a group whose audio outlasts its own
+                    # generation time. The moment the stream ends, generation
+                    # starts immediately with whatever was collected.
+                    batch = [(text, message_id)]
+                    if self.tts_method == "Qwen-3 TTS":
+                        grow_deadline = time.monotonic() + self.QWEN_TTS_GROW_WAIT_SEC
+                        while (self.is_running
+                               and not self.discard_current
+                               and self._stream_active
+                               and len(batch) < self.QWEN_TTS_BATCH_MAX
+                               and len(batch) < self.QWEN_TTS_GROW_TARGET):
+                            wait = grow_deadline - time.monotonic()
+                            if wait <= 0:
+                                break
                             try:
-                                os.remove(output_file)
-                            except Exception:
-                                pass
-                        self.queue.task_done()
-                        continue
+                                nxt = self.queue.get(timeout=min(0.2, wait))
+                            except queue.Empty:
+                                continue
+                            if nxt is None:
+                                self.queue.put(None)
+                                break
+                            n_text, n_mid = nxt if isinstance(nxt, tuple) else (nxt, None)
+                            if n_text:
+                                batch.append((n_text, n_mid))
 
-                    if output_file:
+                        # Final non-blocking drain: don't leave queued
+                        # sentences for a later, smaller batch.
+                        while len(batch) < self.QWEN_TTS_BATCH_MAX:
+                            try:
+                                nxt = self.queue.get_nowait()
+                            except queue.Empty:
+                                break
+                            if nxt is None:
+                                self.queue.put(None)
+                                break
+                            n_text, n_mid = nxt if isinstance(nxt, tuple) else (nxt, None)
+                            if n_text:
+                                batch.append((n_text, n_mid))
+
+                    if len(batch) > 1:
+                        logger.info(f"TTS batch: {len(batch)} sentences in one pass")
+                        batch_files = None
                         try:
-                            import base64
-                            with open(output_file, "rb") as f:
-                                b64_audio = base64.b64encode(f.read()).decode("utf-8")
-                            self.audio_ready_signal.emit(b64_audio)
+                            batch_files = loop.run_until_complete(
+                                self.qwen.generate_speech_batch_with_qwen3(
+                                    [b_text for b_text, _ in batch], self.character_name
+                                )
+                            )
                         except Exception as e:
-                            logger.error(f"Error encoding audio for web client: {e}")
-                        
-                        if message_id:
-                            try:
-                                relative_path = self._persist_segment_for_replay(output_file, message_id)
-                                if relative_path:
-                                    self.segment_saved_signal.emit(message_id, relative_path)
-                            except Exception as e:
-                                logger.error(f"Failed to persist TTS segment for replay: {e}")
+                            logger.warning(f"TTS batch generation failed: {e}")
 
-                        self.playback_worker.add_audio_file(output_file)
+                        if batch_files and len(batch_files) == len(batch):
+                            if self.discard_current:
+                                logger.info("TTS batch finished, but was interrupted. Discarding audio.")
+                                for output_file in batch_files:
+                                    if output_file and os.path.exists(output_file):
+                                        try:
+                                            os.remove(output_file)
+                                        except Exception:
+                                            pass
+                                for _ in batch:
+                                    self.queue.task_done()
+                                continue
 
-                    self.queue.task_done()
+                            for (b_text, b_mid), output_file in zip(batch, batch_files):
+                                logger.info(f"Batch audio ready: {b_text[:30]}...")
+                                self._deliver_output(output_file, b_mid)
+                                self.queue.task_done()
+                            continue
+                        # Batch unavailable (RVC, single-mode engines, error) —
+                        # fall through and process every collected item through
+                        # the regular per-sentence engine chain, order kept.
+
+                    for b_text, b_mid in batch:
+                        if not self.is_running:
+                            break
+                        logger.info(f"Generating Audio for: {b_text[:30]}...")
+                        output_file = self._generate_with_engine_chain(loop, b_text)
+
+                        if self.discard_current:
+                            logger.info("TTS finished, but was interrupted. Discarding audio.")
+                            if output_file and os.path.exists(output_file):
+                                try:
+                                    os.remove(output_file)
+                                except Exception:
+                                    pass
+                            self.queue.task_done()
+                            continue
+
+                        self._deliver_output(output_file, b_mid)
+                        self.queue.task_done()
 
             except queue.Empty:
                 continue

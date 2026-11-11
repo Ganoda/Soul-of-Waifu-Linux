@@ -2,7 +2,10 @@ import logging
 import httpx
 from openai import AsyncOpenAI, APIConnectionError, APITimeoutError
 from app.utils.ai_clients.base_provider import BaseAIProvider
-from app.utils.ai_clients.local_server_manager import recent_embedded_server_error
+from app.utils.ai_clients.local_server_manager import (
+    ensure_embedded_llm_server,
+    recent_embedded_server_error,
+)
 
 logger = logging.getLogger("Local Provider")
 
@@ -14,6 +17,11 @@ REASONING_EFFORT_TO_BUDGET = {
 }
 
 class LocalProvider(BaseAIProvider):
+    # Streaming requests may carry tool schemas: generate_stream then also
+    # emits {"tool_call_deltas": [...]} events alongside text chunks, letting
+    # the GUI run tools inline instead of a separate non-streaming pre-pass.
+    supports_stream_tools = True
+
     def __init__(self, port: int = 48596, advanced_params: dict = None,
                  base_url: str = None, api_key: str = None,
                  model: str = "local-model", sampling_defaults: dict = None):
@@ -73,6 +81,14 @@ class LocalProvider(BaseAIProvider):
             payload["max_tokens"] = max(payload["max_tokens"], budget + 1024)
 
     async def generate_stream(self, messages: list[dict], **kwargs):
+        # Embedded llama-server must be up before the first request; chat,
+        # regenerate and NPC paths reach us without any GUI-side bootstrap.
+        try:
+            await ensure_embedded_llm_server()
+        except Exception as e:
+            logger.error(f"Embedded LLM server bootstrap failed: {e}")
+            # Fall through: the request below surfaces the recorded root cause.
+
         payload = {
             "model": self.model,
             "messages": messages,
@@ -83,6 +99,11 @@ class LocalProvider(BaseAIProvider):
             "frequency_penalty": kwargs.get("frequency_penalty", 0.0),
             "presence_penalty": kwargs.get("presence_penalty", 0.0),
         }
+
+        tools = kwargs.get("tools")
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
 
         stop_sequences = self._param(kwargs, "stop", None)
         if stop_sequences:
@@ -99,8 +120,15 @@ class LocalProvider(BaseAIProvider):
         try:
             completion = await self.client.chat.completions.create(**payload)
             async for chunk in completion:
-                if chunk.choices and chunk.choices[0].delta.content:
-                    yield chunk.choices[0].delta.content
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                # Tool-call fragments surface as non-string events; the GUI
+                # stream wrapper accumulates and executes them inline.
+                if getattr(delta, "tool_calls", None):
+                    yield {"tool_call_deltas": delta.tool_calls}
+                if delta.content:
+                    yield delta.content
         except (APIConnectionError, APITimeoutError) as e:
             yield self._connection_error_message(e)
         except Exception as e:
@@ -108,6 +136,11 @@ class LocalProvider(BaseAIProvider):
             yield f"\n⚠️ Local API Error: {str(e)}"
 
     async def generate_summary(self, messages: list[dict], **kwargs):
+        try:
+            await ensure_embedded_llm_server()
+        except Exception as e:
+            logger.error(f"Embedded LLM server bootstrap failed (summary): {e}")
+
         payload = {
             "model": self.model,
             "messages": messages,
@@ -146,6 +179,11 @@ class LocalProvider(BaseAIProvider):
             yield ""
 
     async def generate(self, messages: list[dict], tools: list = None, **kwargs) -> dict:
+        try:
+            await ensure_embedded_llm_server()
+        except Exception as e:
+            logger.error(f"Embedded LLM server bootstrap failed (generate): {e}")
+
         payload = {
             "model": self.model,
             "messages": messages,
